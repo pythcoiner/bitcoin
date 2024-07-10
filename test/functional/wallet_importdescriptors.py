@@ -760,5 +760,180 @@ class ImportDescriptorsTest(BitcoinTestFramework):
             assert_equal(w_multipath.getrawchangeaddress(address_type="bech32"), w_multisplit.getrawchangeaddress(address_type="bech32"))
         assert_equal(sorted(w_multipath.listdescriptors()["descriptors"], key=lambda x: x["desc"]), sorted(w_multisplit.listdescriptors()["descriptors"], key=lambda x: x["desc"]))
 
+        self.nodes[1].createwallet(wallet_name="multipath2", descriptors=True, blank=True)
+        w_multipath = self.nodes[1].get_wallet_rpc("multipath2")
+        self.test_importdesc({"desc": descsum_create(f"wsh(and_v(v:pk({xpub}/<0;1>/*),pk({xpriv}/<0';1'>/*)))"),
+                              "active": True,
+                              "range": 10,
+                              "timestamp": "now"},
+                              success=True,
+                              warnings=["Not all private keys provided. Some wallet functionality may return unexpected errors",
+                                        "Not all private keys provided. Some wallet functionality may return unexpected errors"],
+                              wallet=w_multipath)
+        self.test_importdesc({"desc": descsum_create(f"wsh(and_v(v:pk({xpriv}/<0;1>/*),or_d(pk({xpriv}/<1;2>/*),older(1000))))"),
+                              "active": True,
+                              "range": 10,
+                              "timestamp": "now"},
+                              success=True,
+                              wallet=w_multipath)
+        self.test_importdesc({"desc": descsum_create(f"wpkh({xpriv}/<10';20'>/0/*)"),
+                              "active": True,
+                              "range": 10,
+                              "timestamp": "now"},
+                              success=True,
+                              wallet=w_multipath)
+        self.test_importdesc({"desc": descsum_create(f"wpkh({xpriv}/<10';20h>/0/*)"),
+                              "active": True,
+                              "range": 10,
+                              "timestamp": "now"},
+                              success=True,
+                              wallet=w_multipath)
+        self.test_importdesc({"desc": descsum_create(f"wpkh({xpriv}/<10h;20'>/0/*)"),
+                              "active": True,
+                              "range": 10,
+                              "timestamp": "now"},
+                              success=True,
+                              wallet=w_multipath)
+        self.test_importdesc({"desc": descsum_create(f"wpkh({xpriv}/<10h;20';30>/0/*)"),
+                              "active": True,
+                              "range": 10,
+                              "timestamp": "now"},
+                              success=True,
+                              wallet=w_multipath)
+        self.test_importdesc({"desc": descsum_create(f"wpkh({xpriv}/<10>/0/*)"),
+                              "active": True,
+                              "range": 10,
+                              "timestamp": "now"},
+                              success=False,
+                              error_code=-5,
+                              error_message="wpkh(): Multipath key path specifiers must have at least two items",
+                              wallet=w_multipath)
+        self.test_importdesc({"desc": descsum_create(f"wpkh({xpriv}/<2147483647;2147483647'>/0/*)"),
+                              "active": True,
+                              "range": 10,
+                              "timestamp": "now"},
+                              success=True,
+                              wallet=w_multipath)
+        self.test_importdesc({"desc": descsum_create(f"wpkh({xpriv}/<0;1;2;3;4>/0/*)"),
+                              "active": True,
+                              "range": 10,
+                              "timestamp": "now"},
+                              success=True,
+                              wallet=w_multipath)
+        self.test_importdesc({"desc": descsum_create(f"wpkh({xpriv}/<2147483648;2147483647'>/0/*)"),
+                              "active": True,
+                              "range": 10,
+                              "timestamp": "now"},
+                              error_code=-5,
+                              error_message="wpkh(): Key path value 2147483648 is out of range",
+                              success=False,
+                              wallet=w_multipath)
+        self.test_importdesc({"desc": descsum_create(f"wpkh({xpriv}/<2147483647;2147483648'>/0/*)"),
+                              "active": True,
+                              "range": 10,
+                              "timestamp": "now"},
+                              error_code=-5,
+                              error_message="wpkh(): Key path value 2147483648 is out of range",
+                              success=False,
+                              wallet=w_multipath)
+        self.test_importdesc({"desc": descsum_create(f"wpkh({xpriv}/<0;1>/<0;1>/*)"),
+                              "active": True,
+                              "range": 10,
+                              "timestamp": "now"},
+                              error_code=-5,
+                              error_message="wpkh(): Multiple multipath key path specifiers found",
+                              success=False,
+                              wallet=w_multipath)
+        self.test_importdesc({"desc": descsum_create(f"wpkh({xpriv}/<0;1>/1/*)"),
+                              "internal": True,
+                              "active": True,
+                              "range": 10,
+                              "timestamp": "now"},
+                              error_code=-5,
+                              error_message="Cannot have multipath descriptor while also specifying 'internal'",
+                              success=False,
+                              wallet=w_multipath)
+        self.test_importdesc({"desc": descsum_create("wsh(pk([d9a64db6/48'/1'/<0';1'>/2']tpubDERzCQj7Gi1mehpkHMoJcCRx1ckWNzbMuiiujVEtCRYZXsojbQNLKJQM66oQEgwyDMHMtKM1GTSUeCM8uC4LtkzKR2Nco7iBTmNuKoZeL1d/1/*))"),
+                              "active": True,
+                              "range": 10,
+                              "timestamp": "now"},
+                              error_code=-5,
+                              error_message="pk(): Key path value '<0';1'>' specifies multipath in a section where multipath is not allowed",
+                              success=False,
+                              wallet=w_multipath)
+
+        self.nodes[1].createwallet(wallet_name="multipath3", descriptors=True, blank=True)
+        w_multipath = self.nodes[1].get_wallet_rpc("multipath3")
+        self.test_importdesc({"desc": descsum_create(f"wpkh({xpub}/<0;1'>/0/*)"),
+                              "active": True,
+                              "range": 10,
+                              "timestamp": "now"},
+                              success=False,
+                              error_code=-4,
+                              error_message="Cannot import descriptor without private keys to a wallet with private keys enabled",
+                              wallet=w_multipath)
+        self.test_importdesc({"desc": descsum_create(f"wpkh({xpub}/<0h;1>/0/*)"),
+                              "active": True,
+                              "range": 10,
+                              "timestamp": "now"},
+                              success=False,
+                              error_code=-4,
+                              error_message="Cannot expand descriptor. Probably because of hardened derivations without private keys provided",
+                              wallet=w_multipath)
+        self.test_importdesc({"desc": descsum_create(f"wpkh({xpriv}/<1;1>/*)"),
+                              "active": True,
+                              "range": 10,
+                              "timestamp": "now"},
+                              success=False,
+                              error_code=-5,
+                              error_message="wpkh(): Duplicated key path value 1 in multipath specifier",
+                              wallet=w_multipath)
+        self.test_importdesc({"desc": descsum_create(f"wpkh({xpriv}/<1;1;1>/*)"),
+                              "active": True,
+                              "range": 10,
+                              "timestamp": "now"},
+                              success=False,
+                              error_code=-5,
+                              error_message="wpkh(): Duplicated key path value 1 in multipath specifier",
+                              wallet=w_multipath)
+
+        self.nodes[1].createwallet(wallet_name="liana", disable_private_keys=True, descriptors=True, blank=True)
+        w_multipath = self.nodes[1].get_wallet_rpc("liana")
+        self.test_importdesc({"desc": "wsh(or_d(pk([d4ab66f1/48'/1'/0'/2']tpubDEXYN145WM4rVKtcWpySBYiVQ229pmrnyAGJT14BBh2QJr7ABJswchDicZfFaauLyXhDad1nCoCZQEwAW87JPotP93ykC9WJvoASnBjYBxW/<0;1>/*),and_v(v:pkh([33fa0ffc/48'/1'/0'/2']tpubDEqzYAym2MnGqKdqu2ZtGQkDTSrvDWCrcoamspjRJR78nr8w5tAgu371r8LtcyWWWXGemenTMxmoLhQM3ww8gUfobBXUWxLEkfR7kGjD6jC/<0;1>/*),older(65535))))#r5c5gqy8",
+                              "active": True,
+                              "range": 10,
+                              "timestamp": "now"},
+                              success=True,
+                              wallet=w_multipath)
+        self.test_importdesc({"desc": "tr([d4ab66f1/48'/1'/0'/2']tpubDEXYN145WM4rVKtcWpySBYiVQ229pmrnyAGJT14BBh2QJr7ABJswchDicZfFaauLyXhDad1nCoCZQEwAW87JPotP93ykC9WJvoASnBjYBxW/<0;1>/*,and_v(v:pk([33fa0ffc/48'/1'/0'/2']tpubDEqzYAym2MnGqKdqu2ZtGQkDTSrvDWCrcoamspjRJR78nr8w5tAgu371r8LtcyWWWXGemenTMxmoLhQM3ww8gUfobBXUWxLEkfR7kGjD6jC/<0;1>/*),older(65535)))#9j8845ej",
+                              "active": True,
+                              "range": 10,
+                              "timestamp": "now"},
+                              success=True,
+                              wallet=w_multipath)
+        self.test_importdesc({"desc": "wsh(or_d(multi(2,[d9a64db6/48'/1'/0'/2']tpubDERzCQj7Gi1mehpkHMoJcCRx1ckWNzbMuiiujVEtCRYZXsojbQNLKJQM66oQEgwyDMHMtKM1GTSUeCM8uC4LtkzKR2Nco7iBTmNuKoZeL1d/<0;1>/*,[d4ab66f1/48'/1'/0'/2']tpubDEXYN145WM4rVKtcWpySBYiVQ229pmrnyAGJT14BBh2QJr7ABJswchDicZfFaauLyXhDad1nCoCZQEwAW87JPotP93ykC9WJvoASnBjYBxW/<0;1>/*),and_v(v:thresh(1,pkh([d9a64db6/48'/1'/0'/2']tpubDERzCQj7Gi1mehpkHMoJcCRx1ckWNzbMuiiujVEtCRYZXsojbQNLKJQM66oQEgwyDMHMtKM1GTSUeCM8uC4LtkzKR2Nco7iBTmNuKoZeL1d/<2;3>/*),a:pkh([d4ab66f1/48'/1'/0'/2']tpubDEXYN145WM4rVKtcWpySBYiVQ229pmrnyAGJT14BBh2QJr7ABJswchDicZfFaauLyXhDad1nCoCZQEwAW87JPotP93ykC9WJvoASnBjYBxW/<2;3>/*)),older(65535))))#y42k746f",
+                              "active": True,
+                              "range": 10,
+                              "timestamp": "now"},
+                              success=True,
+                              wallet=w_multipath)
+        self.test_importdesc({"desc": "tr(tpubD6NzVbkrYhZ4WX3dbgp6RDJZFMKAh1n44x3szXsf585MaWByERJfDBBpydeUH2RFg8nj5GPrk22vecCZzFYRMNfHc2SeQj6oSjipHmEymgV/<0;1>/*,{and_v(v:multi_a(1,[d9a64db6/48'/1'/0'/2']tpubDERzCQj7Gi1mehpkHMoJcCRx1ckWNzbMuiiujVEtCRYZXsojbQNLKJQM66oQEgwyDMHMtKM1GTSUeCM8uC4LtkzKR2Nco7iBTmNuKoZeL1d/<2;3>/*,[d4ab66f1/48'/1'/0'/2']tpubDEXYN145WM4rVKtcWpySBYiVQ229pmrnyAGJT14BBh2QJr7ABJswchDicZfFaauLyXhDad1nCoCZQEwAW87JPotP93ykC9WJvoASnBjYBxW/<2;3>/*),older(65535)),multi_a(2,[d9a64db6/48'/1'/0'/2']tpubDERzCQj7Gi1mehpkHMoJcCRx1ckWNzbMuiiujVEtCRYZXsojbQNLKJQM66oQEgwyDMHMtKM1GTSUeCM8uC4LtkzKR2Nco7iBTmNuKoZeL1d/<0;1>/*,[d4ab66f1/48'/1'/0'/2']tpubDEXYN145WM4rVKtcWpySBYiVQ229pmrnyAGJT14BBh2QJr7ABJswchDicZfFaauLyXhDad1nCoCZQEwAW87JPotP93ykC9WJvoASnBjYBxW/<0;1>/*)})#t0hmfjap",
+                              "active": True,
+                              "range": 10,
+                              "timestamp": "now"},
+                              success=True,
+                              wallet=w_multipath)
+        self.test_importdesc({"desc": "wsh(or_i(and_v(v:thresh(1,pkh([d9a64db6/48'/1'/0'/2']tpubDERzCQj7Gi1mehpkHMoJcCRx1ckWNzbMuiiujVEtCRYZXsojbQNLKJQM66oQEgwyDMHMtKM1GTSUeCM8uC4LtkzKR2Nco7iBTmNuKoZeL1d/<6;7>/*),a:pkh([7cab1066/48'/1'/0'/2']tpubDDvqWeedNeqAfoMYPAV5ewJcgQEuuAC9en8UzxZ3PSqiDZcjpLZSXs9yu2S4hYcQb6S7UrSy8eBvk199WgzAsjWmaE8TW87q3riaXfWcRQ6/<6;7>/*)),older(65535)),or_i(and_v(v:thresh(2,pkh([d9a64db6/48'/1'/0'/2']tpubDERzCQj7Gi1mehpkHMoJcCRx1ckWNzbMuiiujVEtCRYZXsojbQNLKJQM66oQEgwyDMHMtKM1GTSUeCM8uC4LtkzKR2Nco7iBTmNuKoZeL1d/<4;5>/*),a:pkh([7cab1066/48'/1'/0'/2']tpubDDvqWeedNeqAfoMYPAV5ewJcgQEuuAC9en8UzxZ3PSqiDZcjpLZSXs9yu2S4hYcQb6S7UrSy8eBvk199WgzAsjWmaE8TW87q3riaXfWcRQ6/<4;5>/*)),older(45000)),or_i(and_v(v:pkh([d4ab66f1/48'/1'/0'/2']tpubDEXYN145WM4rVKtcWpySBYiVQ229pmrnyAGJT14BBh2QJr7ABJswchDicZfFaauLyXhDad1nCoCZQEwAW87JPotP93ykC9WJvoASnBjYBxW/<6;7>/*),older(40000)),or_i(and_v(v:thresh(2,pkh([d4ab66f1/48'/1'/0'/2']tpubDEXYN145WM4rVKtcWpySBYiVQ229pmrnyAGJT14BBh2QJr7ABJswchDicZfFaauLyXhDad1nCoCZQEwAW87JPotP93ykC9WJvoASnBjYBxW/<4;5>/*),a:pkh([7cab1066/48'/1'/0'/2']tpubDDvqWeedNeqAfoMYPAV5ewJcgQEuuAC9en8UzxZ3PSqiDZcjpLZSXs9yu2S4hYcQb6S7UrSy8eBvk199WgzAsjWmaE8TW87q3riaXfWcRQ6/<2;3>/*)),older(35001)),or_d(multi(3,[d9a64db6/48'/1'/0'/2']tpubDERzCQj7Gi1mehpkHMoJcCRx1ckWNzbMuiiujVEtCRYZXsojbQNLKJQM66oQEgwyDMHMtKM1GTSUeCM8uC4LtkzKR2Nco7iBTmNuKoZeL1d/<0;1>/*,[d4ab66f1/48'/1'/0'/2']tpubDEXYN145WM4rVKtcWpySBYiVQ229pmrnyAGJT14BBh2QJr7ABJswchDicZfFaauLyXhDad1nCoCZQEwAW87JPotP93ykC9WJvoASnBjYBxW/<0;1>/*,[7cab1066/48'/1'/0'/2']tpubDDvqWeedNeqAfoMYPAV5ewJcgQEuuAC9en8UzxZ3PSqiDZcjpLZSXs9yu2S4hYcQb6S7UrSy8eBvk199WgzAsjWmaE8TW87q3riaXfWcRQ6/<0;1>/*),and_v(v:thresh(2,pkh([d9a64db6/48'/1'/0'/2']tpubDERzCQj7Gi1mehpkHMoJcCRx1ckWNzbMuiiujVEtCRYZXsojbQNLKJQM66oQEgwyDMHMtKM1GTSUeCM8uC4LtkzKR2Nco7iBTmNuKoZeL1d/<2;3>/*),a:pkh([d4ab66f1/48'/1'/0'/2']tpubDEXYN145WM4rVKtcWpySBYiVQ229pmrnyAGJT14BBh2QJr7ABJswchDicZfFaauLyXhDad1nCoCZQEwAW87JPotP93ykC9WJvoASnBjYBxW/<2;3>/*)),older(30000))))))))#a34gqnj7",
+                              "active": True,
+                              "range": 10,
+                              "timestamp": "now"},
+                              success=True,
+                              wallet=w_multipath)
+        self.test_importdesc({"desc": "tr(tpubD6NzVbkrYhZ4XVMhAvtZjiXAYJgHjCysEZn9V2fEPfvanysCxV2CmATEyQW5po9WoD5VG4KBxNsgXUuh6eYnrKpyYdyQysM3Kso6mj2DFuD/<0;1>/*,{{{and_v(v:pk([d4ab66f1/48'/1'/0'/2']tpubDEXYN145WM4rVKtcWpySBYiVQ229pmrnyAGJT14BBh2QJr7ABJswchDicZfFaauLyXhDad1nCoCZQEwAW87JPotP93ykC9WJvoASnBjYBxW/<6;7>/*),older(40000)),and_v(v:multi_a(2,[d9a64db6/48'/1'/0'/2']tpubDERzCQj7Gi1mehpkHMoJcCRx1ckWNzbMuiiujVEtCRYZXsojbQNLKJQM66oQEgwyDMHMtKM1GTSUeCM8uC4LtkzKR2Nco7iBTmNuKoZeL1d/<4;5>/*,[7cab1066/48'/1'/0'/2']tpubDDvqWeedNeqAfoMYPAV5ewJcgQEuuAC9en8UzxZ3PSqiDZcjpLZSXs9yu2S4hYcQb6S7UrSy8eBvk199WgzAsjWmaE8TW87q3riaXfWcRQ6/<4;5>/*),older(45000))},{and_v(v:multi_a(1,[d9a64db6/48'/1'/0'/2']tpubDERzCQj7Gi1mehpkHMoJcCRx1ckWNzbMuiiujVEtCRYZXsojbQNLKJQM66oQEgwyDMHMtKM1GTSUeCM8uC4LtkzKR2Nco7iBTmNuKoZeL1d/<6;7>/*,[7cab1066/48'/1'/0'/2']tpubDDvqWeedNeqAfoMYPAV5ewJcgQEuuAC9en8UzxZ3PSqiDZcjpLZSXs9yu2S4hYcQb6S7UrSy8eBvk199WgzAsjWmaE8TW87q3riaXfWcRQ6/<6;7>/*),older(65535)),{and_v(v:multi_a(2,[d9a64db6/48'/1'/0'/2']tpubDERzCQj7Gi1mehpkHMoJcCRx1ckWNzbMuiiujVEtCRYZXsojbQNLKJQM66oQEgwyDMHMtKM1GTSUeCM8uC4LtkzKR2Nco7iBTmNuKoZeL1d/<2;3>/*,[d4ab66f1/48'/1'/0'/2']tpubDEXYN145WM4rVKtcWpySBYiVQ229pmrnyAGJT14BBh2QJr7ABJswchDicZfFaauLyXhDad1nCoCZQEwAW87JPotP93ykC9WJvoASnBjYBxW/<2;3>/*),older(30000)),and_v(v:multi_a(2,[d4ab66f1/48'/1'/0'/2']tpubDEXYN145WM4rVKtcWpySBYiVQ229pmrnyAGJT14BBh2QJr7ABJswchDicZfFaauLyXhDad1nCoCZQEwAW87JPotP93ykC9WJvoASnBjYBxW/<4;5>/*,[7cab1066/48'/1'/0'/2']tpubDDvqWeedNeqAfoMYPAV5ewJcgQEuuAC9en8UzxZ3PSqiDZcjpLZSXs9yu2S4hYcQb6S7UrSy8eBvk199WgzAsjWmaE8TW87q3riaXfWcRQ6/<2;3>/*),older(35001))}}},multi_a(3,[d9a64db6/48'/1'/0'/2']tpubDERzCQj7Gi1mehpkHMoJcCRx1ckWNzbMuiiujVEtCRYZXsojbQNLKJQM66oQEgwyDMHMtKM1GTSUeCM8uC4LtkzKR2Nco7iBTmNuKoZeL1d/<0;1>/*,[d4ab66f1/48'/1'/0'/2']tpubDEXYN145WM4rVKtcWpySBYiVQ229pmrnyAGJT14BBh2QJr7ABJswchDicZfFaauLyXhDad1nCoCZQEwAW87JPotP93ykC9WJvoASnBjYBxW/<0;1>/*,[7cab1066/48'/1'/0'/2']tpubDDvqWeedNeqAfoMYPAV5ewJcgQEuuAC9en8UzxZ3PSqiDZcjpLZSXs9yu2S4hYcQb6S7UrSy8eBvk199WgzAsjWmaE8TW87q3riaXfWcRQ6/<0;1>/*)})#cnlc926x",
+                              "active": True,
+                              "range": 10,
+                              "timestamp": "now"},
+                              success=True,
+                              wallet=w_multipath)
 if __name__ == '__main__':
     ImportDescriptorsTest().main()
