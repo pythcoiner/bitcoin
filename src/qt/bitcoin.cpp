@@ -113,52 +113,52 @@ static QString GetLangTerritory()
     return lang_territory;
 }
 
-/** Set up translations */
-static void initTranslations(QTranslator &qtTranslatorBase, QTranslator &qtTranslator, QTranslator &translatorBase, QTranslator &translator)
-{
-    // Remove old translators
-    QApplication::removeTranslator(&qtTranslatorBase);
-    QApplication::removeTranslator(&qtTranslator);
-    QApplication::removeTranslator(&translatorBase);
-    QApplication::removeTranslator(&translator);
-
-    // Get desired locale (e.g. "de_DE")
-    // 1) System default language
-    QString lang_territory = GetLangTerritory();
-
-    // Convert to "de" only by truncating "_DE"
-    QString lang = lang_territory;
-    lang.truncate(lang_territory.lastIndexOf('_'));
-
-    // Load language files for configured locale:
-    // - First load the translator for the base language, without territory
-    // - Then load the more specific locale translator
-
-#if (QT_VERSION < QT_VERSION_CHECK(6, 0, 0))
-    const QString translation_path{QLibraryInfo::location(QLibraryInfo::TranslationsPath)};
-#else
-    const QString translation_path{QLibraryInfo::path(QLibraryInfo::TranslationsPath)};
-#endif
-    // Load e.g. qt_de.qm
-    if (qtTranslatorBase.load("qt_" + lang, translation_path)) {
-        QApplication::installTranslator(&qtTranslatorBase);
-    }
-
-    // Load e.g. qt_de_DE.qm
-    if (qtTranslator.load("qt_" + lang_territory, translation_path)) {
-        QApplication::installTranslator(&qtTranslator);
-    }
-
-    // Load e.g. bitcoin_de.qm (shortcut "de" needs to be defined in bitcoin.qrc)
-    if (translatorBase.load(lang, ":/translations/")) {
-        QApplication::installTranslator(&translatorBase);
-    }
-
-    // Load e.g. bitcoin_de_DE.qm (shortcut "de_DE" needs to be defined in bitcoin.qrc)
-    if (translator.load(lang_territory, ":/translations/")) {
-        QApplication::installTranslator(&translator);
-    }
-}
+// /** Set up translations */
+// static void initTranslations(QTranslator &qtTranslatorBase, QTranslator &qtTranslator, QTranslator &translatorBase, QTranslator &translator)
+// {
+//     // Remove old translators
+//     QApplication::removeTranslator(&qtTranslatorBase);
+//     QApplication::removeTranslator(&qtTranslator);
+//     QApplication::removeTranslator(&translatorBase);
+//     QApplication::removeTranslator(&translator);
+//
+//     // Get desired locale (e.g. "de_DE")
+//     // 1) System default language
+//     QString lang_territory = GetLangTerritory();
+//
+//     // Convert to "de" only by truncating "_DE"
+//     QString lang = lang_territory;
+//     lang.truncate(lang_territory.lastIndexOf('_'));
+//
+//     // Load language files for configured locale:
+//     // - First load the translator for the base language, without territory
+//     // - Then load the more specific locale translator
+//
+// #if (QT_VERSION < QT_VERSION_CHECK(6, 0, 0))
+//     const QString translation_path{QLibraryInfo::location(QLibraryInfo::TranslationsPath)};
+// #else
+//     const QString translation_path{QLibraryInfo::path(QLibraryInfo::TranslationsPath)};
+// #endif
+//     // Load e.g. qt_de.qm
+//     if (qtTranslatorBase.load("qt_" + lang, translation_path)) {
+//         QApplication::installTranslator(&qtTranslatorBase);
+//     }
+//
+//     // Load e.g. qt_de_DE.qm
+//     if (qtTranslator.load("qt_" + lang_territory, translation_path)) {
+//         QApplication::installTranslator(&qtTranslator);
+//     }
+//
+//     // Load e.g. bitcoin_de.qm (shortcut "de" needs to be defined in bitcoin.qrc)
+//     if (translatorBase.load(lang, ":/translations/")) {
+//         QApplication::installTranslator(&translatorBase);
+//     }
+//
+//     // Load e.g. bitcoin_de_DE.qm (shortcut "de_DE" needs to be defined in bitcoin.qrc)
+//     if (translator.load(lang_territory, ":/translations/")) {
+//         QApplication::installTranslator(&translator);
+//     }
+// }
 
 static bool ErrorSettingsRead(const bilingual_str& error, const std::vector<std::string>& details)
 {
@@ -487,6 +487,7 @@ static void SetupUIArgs(ArgsManager& argsman)
 
 int GuiMain(int argc, char* argv[])
 {
+
 #ifdef WIN32
     common::WinCmdLineArgs winArgs;
     std::tie(argc, argv) = winArgs.get();
@@ -514,14 +515,15 @@ int GuiMain(int argc, char* argv[])
     QCoreApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
 #endif
 
-#if defined(QT_QPA_PLATFORM_ANDROID)
-    QApplication::setAttribute(Qt::AA_DontUseNativeMenuBar);
-    QApplication::setAttribute(Qt::AA_DontCreateNativeWidgetSiblings);
-    QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
-#endif
-
     BitcoinApplication app;
     GUIUtil::LoadFont(QStringLiteral(":/fonts/monospace"));
+
+#ifndef ENABLE_WALLET
+    std::string err = "ENABLE_WALLET should be enabled for build";
+    QMessageBox::critical(nullptr, CLIENT_NAME,
+        QString::fromStdString("ENABLE_WALLET should be enabled for build").arg(QString::fromStdString(err)));
+    return EXIT_FAILURE;
+#endif
 
     /// 2. Parse command-line options. We do this after qt in order to show an error if there are problems parsing these
     // Command-line options take precedence:
@@ -537,34 +539,6 @@ int GuiMain(int argc, char* argv[])
         return EXIT_FAILURE;
     }
 
-    // Error out when loose non-argument tokens are encountered on command line
-    // However, allow BIP-21 URIs only if no options follow
-    bool payment_server_token_seen = false;
-    for (int i = 1; i < argc; i++) {
-        QString arg(argv[i]);
-        bool invalid_token = !arg.startsWith("-");
-#ifdef ENABLE_WALLET
-        if (arg.startsWith(BITCOIN_IPC_PREFIX, Qt::CaseInsensitive)) {
-            invalid_token &= false;
-            payment_server_token_seen = true;
-        }
-#endif
-        if (payment_server_token_seen && arg.startsWith("-")) {
-            InitError(Untranslated(strprintf("Options ('%s') cannot follow a BIP-21 payment URI", argv[i])));
-            QMessageBox::critical(nullptr, CLIENT_NAME,
-                                  // message cannot be translated because translations have not been initialized
-                                  QString::fromStdString("Options ('%1') cannot follow a BIP-21 payment URI").arg(QString::fromStdString(argv[i])));
-            return EXIT_FAILURE;
-        }
-        if (invalid_token) {
-            InitError(Untranslated(strprintf("Command line contains unexpected token '%s', see bitcoin-qt -h for a list of options.", argv[i])));
-            QMessageBox::critical(nullptr, CLIENT_NAME,
-                                  // message cannot be translated because translations have not been initialized
-                                  QString::fromStdString("Command line contains unexpected token '%1', see bitcoin-qt -h for a list of options.").arg(QString::fromStdString(argv[i])));
-            return EXIT_FAILURE;
-        }
-    }
-
     // Now that the QApplication is setup and we have parsed our parameters, we can set the platform style
     app.setupPlatformStyle();
 
@@ -575,19 +549,6 @@ int GuiMain(int argc, char* argv[])
     QApplication::setOrganizationDomain(QAPP_ORG_DOMAIN);
     QApplication::setApplicationName(QAPP_APP_NAME_DEFAULT);
 
-    /// 4. Initialization of translations, so that intro dialog is in user's language
-    // Now that QSettings are accessible, initialize translations
-    QTranslator qtTranslatorBase, qtTranslator, translatorBase, translator;
-    initTranslations(qtTranslatorBase, qtTranslator, translatorBase, translator);
-
-    // Show help message immediately after parsing command-line options (for "-lang") and setting locale,
-    // but before showing splash screen.
-    if (HelpRequested(gArgs) || gArgs.GetBoolArg("-version", false)) {
-        HelpMessageDialog help(nullptr, gArgs.GetBoolArg("-version", false));
-        help.showOrPrint();
-        return EXIT_SUCCESS;
-    }
-
     // Install global event filter that makes sure that long tooltips can be word-wrapped
     app.installEventFilter(new GUIUtil::ToolTipToRichTextFilter(TOOLTIP_WRAP_THRESHOLD, &app));
 
@@ -595,6 +556,8 @@ int GuiMain(int argc, char* argv[])
     // User language is set up: pick a data directory
     bool did_show_intro = false;
     int64_t prune_MiB = 0;  // Intro dialog prune configuration
+
+    // TODO:
     // Gracefully exit if the user cancels
     if (!Intro::showIfNeeded(did_show_intro, prune_MiB)) return EXIT_SUCCESS;
 
@@ -617,34 +580,11 @@ int GuiMain(int argc, char* argv[])
         }
         return EXIT_FAILURE;
     }
-#ifdef ENABLE_WALLET
-    // Parse URIs on command line
-    PaymentServer::ipcParseCommandLine(argc, argv);
-#endif
 
     QScopedPointer<const NetworkStyle> networkStyle(NetworkStyle::instantiate(Params().GetChainType()));
     assert(!networkStyle.isNull());
     // Allow for separate UI settings for testnets
     QApplication::setApplicationName(networkStyle->getAppName());
-    // Re-initialize translations after changing application name (language in network-specific settings can be different)
-    initTranslations(qtTranslatorBase, qtTranslator, translatorBase, translator);
-
-#ifdef ENABLE_WALLET
-    /// 8. URI IPC sending
-    // - Do this early as we don't want to bother initializing if we are just calling IPC
-    // - Do this *after* setting up the data directory, as the data directory hash is used in the name
-    // of the server.
-    // - Do this after creating app and setting up translations, so errors are
-    // translated properly.
-    if (PaymentServer::ipcSendCommandLine())
-        exit(EXIT_SUCCESS);
-
-    // Start up the payment server early, too, so impatient users that click on
-    // bitcoin: links repeatedly have their payment requests routed to this process:
-    if (WalletModel::isWalletEnabled()) {
-        app.createPaymentServer();
-    }
-#endif // ENABLE_WALLET
 
     /// 9. Main GUI initialization
     // Install global event filter that makes sure that out-of-focus labels do not contain text cursor.
@@ -661,9 +601,6 @@ int GuiMain(int argc, char* argv[])
     // Allow parameter interaction before we create the options model
     app.parameterSetup();
     GUIUtil::LogQtInfo();
-
-    if (gArgs.GetBoolArg("-splash", DEFAULT_SPLASHSCREEN) && !gArgs.GetBoolArg("-min", false))
-        app.createSplashScreen(networkStyle.data());
 
     app.createNode(*init);
 
