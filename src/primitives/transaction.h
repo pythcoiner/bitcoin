@@ -104,6 +104,12 @@ public:
     static const uint32_t SEQUENCE_LOCKTIME_TYPE_FLAG = (1 << 22);
 
     /**
+     * If CTxIn::nSequence encodes a relative lock-time and this flag
+     * is set, the relative lock-time has units of 8 blocks.
+     * otherwise it specifies blocks with a granularity of 1. */
+    static const uint32_t SEQUENCE_LOCKTIME_FACTOR_FLAG = (1 << 21);
+
+    /**
      * If CTxIn::nSequence encodes a relative lock-time, this mask is
      * applied to extract that lock-time from the sequence field. */
     static const uint32_t SEQUENCE_LOCKTIME_MASK = 0x0000ffff;
@@ -117,6 +123,12 @@ public:
      * multiplying by 512 = 2^9, or equivalently shifting up by
      * 9 bits. */
     static const int SEQUENCE_LOCKTIME_GRANULARITY = 9;
+
+    /**
+     * Converting from CTxIn::nSequence when the factor is applied
+     * is performed by multiplying by 8 = 2^3, or equivalently
+     * shifting up by 3 bits. */
+    static const int SEQUENCE_LOCKTIME_FACTOR = 3;
 
     CTxIn()
     {

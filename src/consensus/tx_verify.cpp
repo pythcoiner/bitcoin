@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include "logging.h"
 #include <consensus/tx_verify.h>
 
 #include <chain.h>
@@ -86,22 +87,37 @@ std::pair<int, int64_t> CalculateSequenceLocks(const CTransaction &tx, int flags
             // txout being spent, which is the median time past of the
             // block prior.
             nMinTime = std::max(nMinTime, nCoinTime + (int64_t)((txin.nSequence & CTxIn::SEQUENCE_LOCKTIME_MASK) << CTxIn::SEQUENCE_LOCKTIME_GRANULARITY) - 1);
+        } else if (txin.nSequence & CTxIn::SEQUENCE_LOCKTIME_FACTOR) {
+            auto shiftedLocktime = (int)(txin.nSequence & CTxIn::SEQUENCE_LOCKTIME_MASK) << 3;
+            nMinHeight = std::max(nMinHeight, nCoinHeight + shiftedLocktime - 1);
         } else {
             nMinHeight = std::max(nMinHeight, nCoinHeight + (int)(txin.nSequence & CTxIn::SEQUENCE_LOCKTIME_MASK) - 1);
         }
     }
 
+    LogDebug(BCLog::MEMPOOL, "tx_verify.cpp::CalculateSequenceLocks() -> (%u, %u)", nMinHeight, nMinTime);
     return std::make_pair(nMinHeight, nMinTime);
 }
 
 bool EvaluateSequenceLocks(const CBlockIndex& block, std::pair<int, int64_t> lockPair)
 {
-    assert(block.pprev);
-    int64_t nBlockTime = block.pprev->GetMedianTimePast();
-    if (lockPair.first >= block.nHeight || lockPair.second >= nBlockTime)
-        return false;
 
-    return true;
+    assert(block.pprev);
+    if (lockPair.first >= block.nHeight) {
+        auto remain_blocks = lockPair.first - block.nHeight + 1;
+
+        LogDebug(BCLog::MEMPOOL, "tx_verify.cpp::EvaluateSequenceLocks(%u, (%u, %u)) %u blocks remains",
+                 block.nHeight, lockPair.first, lockPair.second, remain_blocks);
+
+    }
+    int64_t nBlockTime = block.pprev->GetMedianTimePast();
+    auto r = true;
+    if (lockPair.first >= block.nHeight || lockPair.second >= nBlockTime)
+        r =  false;
+    LogDebug(BCLog::MEMPOOL, "tx_verify.cpp::EvaluateSequenceLocks(%u, (%u, %u)) -> %s",
+             block.nHeight, lockPair.first, lockPair.second, r);
+
+    return r;
 }
 
 bool SequenceLocks(const CTransaction &tx, int flags, std::vector<int>& prevHeights, const CBlockIndex& block)

@@ -3,6 +3,8 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include "logging.h"
+#include "primitives/transaction.h"
 #include <script/interpreter.h>
 
 #include <crypto/ripemd160.h>
@@ -1737,6 +1739,7 @@ bool GenericTransactionSignatureChecker<T>::CheckLockTime(const CScriptNum& nLoc
 template <class T>
 bool GenericTransactionSignatureChecker<T>::CheckSequence(const CScriptNum& nSequence) const
 {
+    LogDebug(BCLog::MEMPOOL, "interpreter.cpp::GenericTransactionSignatureChecker::CheckSequence()");
     // Relative lock times are supported by comparing the passed
     // in operand to the sequence number of the input.
     const int64_t txToSequence = (int64_t)txTo->vin[nIn].nSequence;
@@ -1755,11 +1758,14 @@ bool GenericTransactionSignatureChecker<T>::CheckSequence(const CScriptNum& nSeq
 
     // Mask off any bits that do not have consensus-enforced meaning
     // before doing the integer comparisons
-    const uint32_t nLockTimeMask = CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG | CTxIn::SEQUENCE_LOCKTIME_MASK;
+    const uint32_t nLockTimeMask = CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG
+        | CTxIn::SEQUENCE_LOCKTIME_MASK
+        | CTxIn::SEQUENCE_LOCKTIME_FACTOR_FLAG;
     const int64_t txToSequenceMasked = txToSequence & nLockTimeMask;
     const CScriptNum nSequenceMasked = nSequence & nLockTimeMask;
 
-    // There are two kinds of nSequence: lock-by-blockheight
+    // There are three kinds of nSequence: lock-by-blockheight
+    // lock-by-blockheight with a factor of 8
     // and lock-by-blocktime, distinguished by whether
     // nSequenceMasked < CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG.
     //
@@ -1767,8 +1773,9 @@ bool GenericTransactionSignatureChecker<T>::CheckSequence(const CScriptNum& nSeq
     // unless the type of nSequenceMasked being tested is the same as
     // the nSequenceMasked in the transaction.
     if (!(
-        (txToSequenceMasked <  CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG && nSequenceMasked <  CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG) ||
-        (txToSequenceMasked >= CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG && nSequenceMasked >= CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG)
+        ((nSequenceMasked & CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG) == (txToSequenceMasked & CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG)) &&
+        ((nSequenceMasked & CTxIn::SEQUENCE_LOCKTIME_DISABLE_FLAG) == (txToSequenceMasked & CTxIn::SEQUENCE_LOCKTIME_DISABLE_FLAG)) &&
+        ((nSequenceMasked & CTxIn::SEQUENCE_LOCKTIME_FACTOR_FLAG) == (txToSequenceMasked & CTxIn::SEQUENCE_LOCKTIME_FACTOR_FLAG))
     )) {
         return false;
     }

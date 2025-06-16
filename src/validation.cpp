@@ -259,7 +259,9 @@ bool CheckSequenceLocksAtTip(CBlockIndex* tip,
     // *next* block, we need to use one more than active_chainstate.m_chain.Height()
     index.nHeight = tip->nHeight + 1;
 
-    return EvaluateSequenceLocks(index, {lock_points.height, lock_points.time});
+    auto r =  EvaluateSequenceLocks(index, {lock_points.height, lock_points.time});
+    LogDebug(BCLog::MEMPOOL, "validation.cpp::ChecksSequenceLocksAtTip(tip: %u) -> %s", tip->nHeight, r);
+    return r;
 }
 
 // Returns the script flags which should be checked for a given block
