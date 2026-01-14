@@ -6,6 +6,7 @@
 
 #include <cstring>
 
+#include <hash.h>
 #include <key_io.h>
 #include <script/descriptor.h>
 
@@ -87,6 +88,42 @@ util::Result<std::pair<std::vector<uint256>, std::vector<DerivationPath>>> Extra
     return std::make_pair(
         std::vector<uint256>(normalized_keys.begin(), normalized_keys.end()),
         std::vector<DerivationPath>(unique_paths.begin(), unique_paths.end()));
+}
+
+uint256 ComputeDecryptionSecret(const std::vector<uint256>& keys)
+{
+    // BIP340-style tagged hash: sha256(sha256(tag) || sha256(tag) || p1 || ... || pn)
+    HashWriter hasher{TaggedHash(std::string{BIP_DECRYPTION_SECRET_TAG})};
+    for (const auto& key : keys) {
+        hasher << std::span{key.data(), 32};
+    }
+    return hasher.GetSHA256();
+}
+
+uint256 ComputeIndividualSecret(const uint256& key)
+{
+    // BIP340-style tagged hash: sha256(sha256(tag) || sha256(tag) || pi)
+    HashWriter hasher{TaggedHash(std::string{BIP_INDIVIDUAL_SECRET_TAG})};
+    hasher << std::span{key.data(), 32};
+    return hasher.GetSHA256();
+}
+
+std::vector<uint256> ComputeAllIndividualSecrets(const uint256& decryption_secret,
+                                                  const std::vector<uint256>& keys)
+{
+    std::vector<uint256> result;
+    result.reserve(keys.size());
+
+    for (const auto& key : keys) {
+        uint256 si = ComputeIndividualSecret(key);
+        // ci = s XOR si
+        uint256 ci;
+        for (size_t i = 0; i < 32; ++i) {
+            ci.data()[i] = decryption_secret.data()[i] ^ si.data()[i];
+        }
+        result.push_back(ci);
+    }
+    return result;
 }
 
 } // namespace wallet
