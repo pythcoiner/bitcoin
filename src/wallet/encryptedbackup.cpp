@@ -9,6 +9,7 @@
 #include <hash.h>
 #include <key_io.h>
 #include <script/descriptor.h>
+#include <util/bip32.h>
 
 namespace wallet {
 
@@ -124,6 +125,87 @@ std::vector<uint256> ComputeAllIndividualSecrets(const uint256& decryption_secre
         result.push_back(ci);
     }
     return result;
+}
+
+util::Result<DerivationPath> ParseDerivationPath(const std::string& path_str)
+{
+    DerivationPath result;
+    if (path_str.empty() || !ParseHDKeypath(path_str, result)) {
+        return util::Error{Untranslated(strprintf("Invalid derivation path: %s", path_str))};
+    }
+    return result;
+}
+
+// <COUNT><CHILD_COUNT><CHILD>...<CHILD><CHILD_COUNT><CHILD>...<CHILD>
+util::Result<std::vector<uint8_t>> EncodeDerivationPaths(const std::vector<DerivationPath>& paths)
+{
+    if (paths.size() > 255) {
+        return util::Error{Untranslated("Too many derivation paths (max 255)")};
+    }
+
+    std::vector<uint8_t> result;
+    // <COUNT>
+    result.push_back(static_cast<uint8_t>(paths.size()));
+
+    for (const auto& path : paths) {
+        if (path.size() > 255) {
+            return util::Error{Untranslated("Derivation path too long (max 255 child)")};
+        }
+        // <CHILD_COUNT>
+        result.push_back(static_cast<uint8_t>(path.size()));
+        for (uint32_t child : path) {
+            // <CHILD> (Big Endian)
+            result.push_back((child >> 24) & 0xFF);
+            result.push_back((child >> 16) & 0xFF);
+            result.push_back((child >> 8) & 0xFF);
+            result.push_back(child & 0xFF);
+        }
+    }
+
+    return result;
+}
+
+util::Result<std::pair<std::vector<DerivationPath>, size_t>> DecodeDerivationPaths(std::span<const uint8_t> data)
+{
+    if (data.empty()) {
+        return util::Error{Untranslated("Empty derivation paths data")};
+    }
+
+    // Parsed paths are deduplicated and sorted on decode, matching the
+    // reference implementation's BTreeSet behavior.
+    std::set<DerivationPath> unique_paths;
+    size_t pos = 0;
+
+    uint8_t count = data[pos++];
+
+    for (uint8_t i = 0; i < count; ++i) {
+        if (pos >= data.size()) {
+            return util::Error{Untranslated("Truncated derivation path data")};
+        }
+
+        uint8_t child_count = data[pos++];
+        if (child_count == 0) {
+            return util::Error{Untranslated("Child count must be > 0")};
+        }
+
+        DerivationPath path;
+        path.reserve(child_count);
+
+        for (uint8_t j = 0; j < child_count; ++j) {
+            if (pos + 4 > data.size()) {
+                return util::Error{Untranslated("Truncated child index")};
+            }
+            uint32_t child = (static_cast<uint32_t>(data[pos]) << 24) |
+                            (static_cast<uint32_t>(data[pos + 1]) << 16) |
+                            (static_cast<uint32_t>(data[pos + 2]) << 8) |
+                            static_cast<uint32_t>(data[pos + 3]);
+            pos += 4;
+            path.push_back(child);
+        }
+        unique_paths.insert(std::move(path));
+    }
+
+    return std::make_pair(std::vector<DerivationPath>(unique_paths.begin(), unique_paths.end()), pos);
 }
 
 } // namespace wallet

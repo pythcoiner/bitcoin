@@ -4,6 +4,7 @@
 
 #include <wallet/encryptedbackup.h>
 
+#include <test/data/bip_encrypted_backup_derivation_path.json.h>
 #include <test/data/bip_encrypted_backup_encryption_secret.json.h>
 #include <test/data/bip_encrypted_backup_keys_types.json.h>
 
@@ -181,6 +182,129 @@ BOOST_AUTO_TEST_CASE(nums_point_test)
     uint256 random_key;
     GetStrongRandBytes(random_key);
     BOOST_CHECK(!IsNUMSPoint(random_key));
+}
+
+BOOST_AUTO_TEST_CASE(derivation_path_encoding_test)
+{
+    // Test derivation path encoding using BIP test vectors
+    UniValue vectors = read_json(json_tests::bip_encrypted_backup_derivation_path);
+
+    for (size_t i = 0; i < vectors.size(); ++i) {
+        const UniValue& vec = vectors[i];
+        std::string description = vec["description"].get_str();
+        const UniValue& paths_arr = vec["paths"];
+
+        BOOST_TEST_MESSAGE("Testing: " << description);
+
+        // Parse paths
+        std::vector<DerivationPath> paths;
+        bool parse_failed = false;
+        for (size_t j = 0; j < paths_arr.size(); ++j) {
+            auto path_result = ParseDerivationPath(paths_arr[j].get_str());
+            if (!path_result) {
+                parse_failed = true;
+                break;
+            }
+            paths.push_back(*path_result);
+        }
+
+        // Check if this test vector should fail
+        if (vec["expected"].isNull()) {
+            if (!parse_failed) {
+                auto encoded_result = EncodeDerivationPaths(paths);
+                BOOST_CHECK_MESSAGE(!encoded_result,
+                    description << ": expected failure but got success");
+            }
+            continue;
+        }
+
+        BOOST_REQUIRE_MESSAGE(!parse_failed, description << ": unexpected parse failure");
+        std::string expected_hex = vec["expected"].get_str();
+
+        // Encode
+        auto encoded_result = EncodeDerivationPaths(paths);
+        BOOST_REQUIRE_MESSAGE(encoded_result, util::ErrorString(encoded_result).original);
+
+        std::string result_hex = HexStr(*encoded_result);
+        BOOST_CHECK_MESSAGE(result_hex == expected_hex,
+            description << ": expected " << expected_hex << " got " << result_hex);
+
+        // Test round-trip decode
+        auto decoded_result = DecodeDerivationPaths(*encoded_result);
+        BOOST_REQUIRE_MESSAGE(decoded_result, util::ErrorString(decoded_result).original);
+        BOOST_CHECK_EQUAL(decoded_result->first.size(), paths.size());
+        BOOST_CHECK_EQUAL(decoded_result->second, encoded_result->size());
+    }
+}
+
+// ---------- Derivation path edge cases ----------
+
+BOOST_AUTO_TEST_CASE(derivation_path_parse_corrupt_test)
+{
+    // child count = 1 but 0/1/2/3 trailing bytes => truncated (need 4)
+    BOOST_CHECK(!DecodeDerivationPaths(std::vector<uint8_t>{0x01, 0x01, 0x00}));
+    BOOST_CHECK(!DecodeDerivationPaths(std::vector<uint8_t>{0x01, 0x01, 0x00, 0x00}));
+    BOOST_CHECK(!DecodeDerivationPaths(std::vector<uint8_t>{0x01, 0x01, 0x00, 0x00, 0x00}));
+    // child count = 0 is invalid
+    BOOST_CHECK(!DecodeDerivationPaths(std::vector<uint8_t>{0x01, 0x00}));
+    // single valid path m/1
+    auto ok = DecodeDerivationPaths(std::vector<uint8_t>{0x01, 0x01, 0x00, 0x00, 0x00, 0x01});
+    BOOST_REQUIRE(ok);
+    BOOST_CHECK_EQUAL(ok->first.size(), 1u);
+}
+
+BOOST_AUTO_TEST_CASE(derivation_path_empty_test)
+{
+    auto bytes = EncodeDerivationPaths({});
+    BOOST_REQUIRE(bytes);
+    BOOST_CHECK_EQUAL(HexStr(*bytes), "00");
+    auto decoded = DecodeDerivationPaths(*bytes);
+    BOOST_REQUIRE(decoded);
+    BOOST_CHECK(decoded->first.empty());
+}
+
+BOOST_AUTO_TEST_CASE(derivation_path_too_many_test)
+{
+    std::vector<DerivationPath> paths;
+    DerivationPath p{0, 1, 2, 3};
+    for (size_t i = 0; i < 256; ++i) {
+        DerivationPath tmp = p;
+        tmp[0] = static_cast<uint32_t>(i);
+        paths.push_back(tmp);
+    }
+    BOOST_CHECK(!EncodeDerivationPaths(paths));
+}
+
+BOOST_AUTO_TEST_CASE(derivation_path_too_long_test)
+{
+    DerivationPath path(256, 0u);
+    BOOST_CHECK(!EncodeDerivationPaths({path}));
+}
+
+BOOST_AUTO_TEST_CASE(derivation_path_decode_dedup_test)
+{
+    // Hand-craft a byte stream with two identical paths; decoder must collapse.
+    std::vector<uint8_t> bytes{0x02,
+        0x01, 0x00, 0x00, 0x00, 0x01,
+        0x01, 0x00, 0x00, 0x00, 0x01};
+    auto decoded = DecodeDerivationPaths(bytes);
+    BOOST_REQUIRE(decoded);
+    BOOST_CHECK_EQUAL(decoded->first.size(), 1u);
+}
+
+BOOST_AUTO_TEST_CASE(derivation_path_decode_sorted_test)
+{
+    // Encode two paths in unsorted order, decode must return them sorted.
+    auto bytes = EncodeDerivationPaths({
+        DerivationPath{0x80000054u, 0x80000000u, 0x80000000u, 0x80000002u},
+        DerivationPath{0u, 0x80000001u, 2u, 0x80000003u},
+    });
+    BOOST_REQUIRE(bytes);
+    auto decoded = DecodeDerivationPaths(*bytes);
+    BOOST_REQUIRE(decoded);
+    BOOST_REQUIRE_EQUAL(decoded->first.size(), 2u);
+    BOOST_CHECK_EQUAL(decoded->first[0][0], 0u);
+    BOOST_CHECK_EQUAL(decoded->first[1][0], 0x80000054u);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
