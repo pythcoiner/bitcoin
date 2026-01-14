@@ -5,6 +5,7 @@
 #include <wallet/encryptedbackup.h>
 
 #include <cstring>
+#include <set>
 
 #include <hash.h>
 #include <key_io.h>
@@ -101,6 +102,15 @@ uint256 ComputeDecryptionSecret(const std::vector<uint256>& keys)
     return hasher.GetSHA256();
 }
 
+uint256 XorUint256(const uint256& a, const uint256& b)
+{
+    uint256 out;
+    for (size_t i = 0; i < 32; ++i) {
+        out.data()[i] = a.data()[i] ^ b.data()[i];
+    }
+    return out;
+}
+
 uint256 ComputeIndividualSecret(const uint256& key)
 {
     // BIP340-style tagged hash: sha256(sha256(tag) || sha256(tag) || pi)
@@ -118,11 +128,7 @@ std::vector<uint256> ComputeAllIndividualSecrets(const uint256& decryption_secre
     for (const auto& key : keys) {
         uint256 si = ComputeIndividualSecret(key);
         // ci = s XOR si
-        uint256 ci;
-        for (size_t i = 0; i < 32; ++i) {
-            ci.data()[i] = decryption_secret.data()[i] ^ si.data()[i];
-        }
-        result.push_back(ci);
+        result.push_back(XorUint256(decryption_secret, si));
     }
     return result;
 }
@@ -206,6 +212,56 @@ util::Result<std::pair<std::vector<DerivationPath>, size_t>> DecodeDerivationPat
     }
 
     return std::make_pair(std::vector<DerivationPath>(unique_paths.begin(), unique_paths.end()), pos);
+}
+
+util::Result<std::vector<uint8_t>> EncodeIndividualSecrets(const std::vector<uint256>& secrets)
+{
+    // Deduplicate and sort lexicographically.
+    std::set<uint256> unique_secrets(secrets.begin(), secrets.end());
+    if (unique_secrets.empty()) {
+        return util::Error{Untranslated("At least one individual secret is required")};
+    }
+    if (unique_secrets.size() > 255) {
+        return util::Error{Untranslated("Too many individual secrets (max 255)")};
+    }
+
+    std::vector<uint8_t> result;
+    result.reserve(1 + unique_secrets.size() * SECRET_SIZE);
+    result.push_back(static_cast<uint8_t>(unique_secrets.size()));
+
+    for (const auto& secret : unique_secrets) {
+        result.insert(result.end(), secret.begin(), secret.end());
+    }
+
+    return result;
+}
+
+util::Result<std::pair<std::vector<uint256>, size_t>> DecodeIndividualSecrets(std::span<const uint8_t> data)
+{
+    if (data.empty()) {
+        return util::Error{Untranslated("Empty individual secrets data")};
+    }
+
+    uint8_t count = data[0];
+    if (count == 0) {
+        return util::Error{Untranslated("At least one individual secret is required")};
+    }
+
+    size_t expected_size = 1 + count * SECRET_SIZE;
+    if (data.size() < expected_size) {
+        return util::Error{Untranslated("Truncated individual secrets data")};
+    }
+
+    // Parsed secrets are deduplicated and sorted on decode, matching the
+    // reference implementation's BTreeSet behavior.
+    std::set<uint256> unique_secrets;
+    for (size_t i = 0; i < count; ++i) {
+        uint256 secret;
+        std::memcpy(secret.data(), data.data() + 1 + i * SECRET_SIZE, SECRET_SIZE);
+        unique_secrets.insert(secret);
+    }
+
+    return std::make_pair(std::vector<uint256>(unique_secrets.begin(), unique_secrets.end()), expected_size);
 }
 
 } // namespace wallet

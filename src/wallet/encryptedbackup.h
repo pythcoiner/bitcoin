@@ -5,6 +5,7 @@
 #ifndef BITCOIN_WALLET_ENCRYPTEDBACKUP_H
 #define BITCOIN_WALLET_ENCRYPTEDBACKUP_H
 
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <string>
@@ -15,6 +16,8 @@
 #include <util/result.h>
 
 namespace wallet {
+
+const size_t SECRET_SIZE = 32;
 
 /**
  * Implements the encrypted backup scheme from BIP-XXXX (draft).
@@ -138,6 +141,22 @@ util::Result<std::vector<uint8_t>> EncodeDerivationPaths(const std::vector<Deriv
  * @return Pair of (derivation paths, bytes consumed), or error message
  */
 util::Result<std::pair<std::vector<DerivationPath>, size_t>> DecodeDerivationPaths(std::span<const uint8_t> data);
+
+/**
+ * Encode individual secrets according to the backup format.
+ *
+ * @param[in] secrets Vector of individual secrets
+ * @return Encoded bytes, or error if empty or too many secrets
+ */
+util::Result<std::vector<uint8_t>> EncodeIndividualSecrets(const std::vector<uint256>& secrets);
+
+/**
+ * Decode individual secrets from backup format.
+ *
+ * @param[in] data The encoded data
+ * @return Pair of (individual secrets, bytes consumed), or error message
+ */
+util::Result<std::pair<std::vector<uint256>, size_t>> DecodeIndividualSecrets(std::span<const uint8_t> data);
 
 } // namespace wallet
 

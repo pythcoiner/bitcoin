@@ -6,6 +6,7 @@
 
 #include <test/data/bip_encrypted_backup_derivation_path.json.h>
 #include <test/data/bip_encrypted_backup_encryption_secret.json.h>
+#include <test/data/bip_encrypted_backup_individual_secrets.json.h>
 #include <test/data/bip_encrypted_backup_keys_types.json.h>
 
 #include <base58.h>
@@ -305,6 +306,102 @@ BOOST_AUTO_TEST_CASE(derivation_path_decode_sorted_test)
     BOOST_REQUIRE_EQUAL(decoded->first.size(), 2u);
     BOOST_CHECK_EQUAL(decoded->first[0][0], 0u);
     BOOST_CHECK_EQUAL(decoded->first[1][0], 0x80000054u);
+}
+
+BOOST_AUTO_TEST_CASE(individual_secrets_encoding_test)
+{
+    // Test individual secrets encoding using BIP test vectors
+    UniValue vectors = read_json(json_tests::bip_encrypted_backup_individual_secrets);
+
+    for (size_t i = 0; i < vectors.size(); ++i) {
+        const UniValue& vec = vectors[i];
+        std::string description = vec["description"].get_str();
+
+        BOOST_TEST_MESSAGE("Testing: " << description);
+
+        const UniValue& secrets_arr = vec["secrets"];
+
+        // Parse secrets
+        std::vector<uint256> secrets;
+        for (size_t j = 0; j < secrets_arr.size(); ++j) {
+            auto secret_bytes = ParseHex(secrets_arr[j].get_str());
+            if (secret_bytes.size() == 32) {
+                uint256 secret;
+                std::memcpy(secret.data(), secret_bytes.data(), 32);
+                secrets.push_back(secret);
+            }
+        }
+
+        // Check if this should fail
+        if (vec["expected"].isNull()) {
+            auto encoded_result = EncodeIndividualSecrets(secrets);
+            BOOST_CHECK_MESSAGE(!encoded_result,
+                description << ": expected failure but got success");
+            continue;
+        }
+
+        std::string expected_hex = vec["expected"].get_str();
+
+        // Encode
+        auto encoded_result = EncodeIndividualSecrets(secrets);
+        BOOST_REQUIRE_MESSAGE(encoded_result, util::ErrorString(encoded_result).original);
+
+        std::string result_hex = HexStr(*encoded_result);
+        BOOST_CHECK_MESSAGE(result_hex == expected_hex,
+            description << ": expected " << expected_hex << " got " << result_hex);
+
+        // Test round-trip decode
+        auto decoded_result = DecodeIndividualSecrets(*encoded_result);
+        BOOST_REQUIRE_MESSAGE(decoded_result, util::ErrorString(decoded_result).original);
+        BOOST_CHECK_EQUAL(decoded_result->first.size(), secrets.size());
+        BOOST_CHECK_EQUAL(decoded_result->second, encoded_result->size());
+    }
+}
+
+// ---------- Individual secrets edge cases ----------
+
+BOOST_AUTO_TEST_CASE(individual_secrets_parse_empty_test)
+{
+    BOOST_CHECK(!DecodeIndividualSecrets(std::vector<uint8_t>{}));
+    BOOST_CHECK(!DecodeIndividualSecrets(std::vector<uint8_t>{0x00}));
+}
+
+BOOST_AUTO_TEST_CASE(individual_secrets_encode_empty_test)
+{
+    BOOST_CHECK(!EncodeIndividualSecrets({}));
+}
+
+BOOST_AUTO_TEST_CASE(individual_secrets_too_many_test)
+{
+    std::vector<uint256> secrets;
+    for (size_t i = 0; i < 256; ++i) {
+        uint256 s;
+        GetStrongRandBytes(s);
+        secrets.push_back(s);
+    }
+    BOOST_CHECK(!EncodeIndividualSecrets(secrets));
+}
+
+BOOST_AUTO_TEST_CASE(individual_secrets_encode_dedup_byte_test)
+{
+    // Two identical secrets collapse to one in the encoding.
+    uint256 zero;
+    std::memset(zero.data(), 0, 32);
+    auto bytes = EncodeIndividualSecrets({zero, zero});
+    BOOST_REQUIRE(bytes);
+    std::string expected = "01" + std::string(64, '0');
+    BOOST_CHECK_EQUAL(HexStr(*bytes), expected);
+}
+
+BOOST_AUTO_TEST_CASE(individual_secrets_decode_dedup_test)
+{
+    // Byte stream with count=2 and identical payloads; decoder collapses.
+    std::vector<uint8_t> bytes{0x02};
+    bytes.resize(1 + 2 * 32, 0x00);
+    auto decoded = DecodeIndividualSecrets(bytes);
+    BOOST_REQUIRE(decoded);
+    BOOST_CHECK_EQUAL(decoded->first.size(), 1u);
+    BOOST_CHECK_EQUAL(decoded->second, 1 + 2 * 32);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
