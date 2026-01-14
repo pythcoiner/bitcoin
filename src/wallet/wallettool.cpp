@@ -7,6 +7,8 @@
 #include <common/args.h>
 #include <fstream>
 #include <script/descriptor.h>
+#include <univalue.h>
+#include <util/bip32.h>
 #include <util/check.h>
 #include <util/fs.h>
 #include <util/translation.h>
@@ -138,8 +140,8 @@ bool ExecuteWalletToolFunc(const ArgsManager& args, const std::string& command)
         tfm::format(std::cerr, "The -dumpfile option can only be used with the \"dump\" and \"createfromdump\" commands.\n");
         return false;
     }
-    if (args.IsArgSet("-backupfile") && command != "encryptdescriptor" && command != "decryptdescriptor" && command != "importencrypteddescriptor") {
-        tfm::format(std::cerr, "The -backupfile option can only be used with the \"encryptdescriptor\", \"decryptdescriptor\" and \"importencrypteddescriptor\" commands.\n");
+    if (args.IsArgSet("-backupfile") && command != "encryptdescriptor" && command != "decryptdescriptor" && command != "importencrypteddescriptor" && command != "inspectencryptedbackup") {
+        tfm::format(std::cerr, "The -backupfile option can only be used with the \"encryptdescriptor\", \"decryptdescriptor\", \"importencrypteddescriptor\", and \"inspectencryptedbackup\" commands.\n");
         return false;
     }
     if ((command == "create" || command == "createfromdump") && !args.IsArgSet("-wallet")) {
@@ -345,6 +347,38 @@ bool ExecuteWalletToolFunc(const ArgsManager& args, const std::string& command)
 
         tfm::format(std::cout, "Descriptor imported successfully into wallet \"%s\".\n", name);
         wallet_instance->Close();
+    } else if (command == "inspectencryptedbackup") {
+        // Show unencrypted metadata from a backup
+        auto backup_result = ReadBackupFromArgsOrStdin(args);
+        if (!backup_result) {
+            tfm::format(std::cerr, "Failed to decode backup: %s\n",
+                        util::ErrorString(backup_result).original);
+            return false;
+        }
+
+        const EncryptedBackup& backup = *backup_result;
+
+        // Output metadata as JSON (only unencrypted header fields)
+        UniValue result(UniValue::VOBJ);
+        result.pushKV("version", backup.version);
+        result.pushKV("keys", static_cast<int>(backup.individual_secrets.size()));
+
+        // Encryption algorithm
+        std::string enc_str;
+        switch (backup.encryption) {
+            case EncryptionAlgorithm::CHACHA20_POLY1305: enc_str = "ChaCha20-Poly1305"; break;
+            default: enc_str = "unknown"; break;
+        }
+        result.pushKV("encryption", enc_str);
+
+        // Derivation paths
+        UniValue paths_arr(UniValue::VARR);
+        for (const auto& path : backup.derivation_paths) {
+            paths_arr.push_back(WriteHDKeypath(path, /*apostrophe=*/true));
+        }
+        result.pushKV("derivation_paths", paths_arr);
+
+        tfm::format(std::cout, "%s\n", result.write(2));
     } else {
         tfm::format(std::cerr, "Invalid command: %s\n", command);
         return false;

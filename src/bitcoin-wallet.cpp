@@ -42,7 +42,7 @@ static void SetupWalletToolArgs(ArgsManager& argsman)
     argsman.AddArg("-printtoconsole", "Send trace/debug info to console (default: 1 when no -debug is true, 0 otherwise).", ArgsManager::ALLOW_ANY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-descriptor=<descriptor>", "Descriptor string to encrypt (with checksum)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::OPTIONS);
     argsman.AddArg("-xpub=<key>", "Extended public key (xpub/tpub) for decrypting a backup", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::OPTIONS);
-    argsman.AddArg("-backupfile=<file name>", "When used with 'encryptdescriptor', writes the raw binary backup to this file (no base64). When used with 'decryptdescriptor' or 'inspectencrypteddescriptor', reads the raw binary backup from this file.", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::OPTIONS);
+    argsman.AddArg("-backupfile=<file name>", "When used with 'encryptdescriptor', writes the raw binary backup to this file (no base64). When used with 'decryptdescriptor' or 'inspectencryptedbackup', reads the raw binary backup from this file.", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::OPTIONS);
 
     argsman.AddCommand("info", "Get wallet info");
     argsman.AddCommand("create", "Create a new descriptor wallet file");
@@ -51,6 +51,7 @@ static void SetupWalletToolArgs(ArgsManager& argsman)
     argsman.AddCommand("encryptdescriptor", "Encrypt a descriptor string (outputs base64 to stdout, or raw binary to -backupfile)");
     argsman.AddCommand("decryptdescriptor", "Decrypt an encrypted backup and output the descriptor string (reads base64 from stdin or raw binary from -backupfile, requires -xpub)");
     argsman.AddCommand("importencrypteddescriptor", "Decrypt an encrypted backup and import the descriptor into a wallet (requires -wallet, -xpub; reads base64 from stdin or raw binary from -backupfile)");
+    argsman.AddCommand("inspectencryptedbackup", "Show metadata from an encrypted backup (reads base64 from stdin or raw binary from -backupfile)");
 }
 
 static std::optional<int> WalletAppInit(ArgsManager& args, int argc, char* argv[])

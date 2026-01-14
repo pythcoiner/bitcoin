@@ -461,6 +461,17 @@ class ToolWalletTest(BitcoinTestFramework):
         backup_bytes = base64.b64decode(backup_base64)
         assert backup_bytes[:3] == b"BIP", f"Expected magic 'BIP', got: {backup_bytes[:3]}"
 
+        # Test inspectencryptedbackup on the base64 backup
+        self.log.info("Testing inspectencryptedbackup command...")
+        import json
+        p = self.bitcoin_wallet_process("inspectencryptedbackup")
+        inspect_output, stderr = p.communicate(input=backup_base64)
+        assert_equal(p.poll(), 0)
+        metadata = json.loads(inspect_output)
+        assert_equal(metadata["version"], 1)
+        assert_equal(metadata["encryption"], "ChaCha20-Poly1305")
+        assert metadata["keys"] >= 1
+
         # Test raw binary backup file roundtrip via -backupfile
         self.log.info("Testing raw binary backup via -backupfile...")
         backup_file = self.nodes[0].datadir_path / "backup.bin"
@@ -482,6 +493,15 @@ class ToolWalletTest(BitcoinTestFramework):
             "already exists",
             f"-descriptor={chosen_desc}", f"-backupfile={backup_file}", "encryptdescriptor",
         )
+
+        # Inspect from file using -backupfile
+        p = self.bitcoin_wallet_process(f"-backupfile={backup_file}", "inspectencryptedbackup")
+        inspect_output, stderr = p.communicate()
+        assert_equal(p.poll(), 0)
+        metadata_from_file = json.loads(inspect_output)
+        assert_equal(metadata_from_file["version"], 1)
+        assert_equal(metadata_from_file["encryption"], "ChaCha20-Poly1305")
+        assert metadata_from_file["keys"] >= 1
 
         backup_file.unlink()
 
@@ -734,6 +754,24 @@ class ToolWalletTest(BitcoinTestFramework):
 
         self.log.info("wallet-tool importencrypteddescriptor error cases passed!")
 
+    def test_inspect_encrypted_backup_errors(self):
+        """Test wallet-tool inspectencryptedbackup error paths."""
+        self.log.info("Test wallet-tool inspectencryptedbackup error cases")
+
+        # Empty stdin
+        p = self.bitcoin_wallet_process("inspectencryptedbackup")
+        _, stderr = p.communicate(input="")
+        assert_equal(p.poll(), 1)
+        assert "No backup data provided on stdin" in stderr
+
+        # Garbage stdin
+        p = self.bitcoin_wallet_process("inspectencryptedbackup")
+        _, stderr = p.communicate(input="not-valid-base64!!!")
+        assert_equal(p.poll(), 1)
+        assert stderr.strip() != ""
+
+        self.log.info("wallet-tool inspectencryptedbackup error cases passed!")
+
     def run_test(self):
         self.wallet_path = self.nodes[0].wallets_path / self.default_wallet_name / self.wallet_data_filename
         self.test_invalid_tool_commands_and_args()
@@ -754,6 +792,7 @@ class ToolWalletTest(BitcoinTestFramework):
         self.test_decrypt_descriptor_errors()
         self.test_import_encrypted_descriptor()
         self.test_import_encrypted_descriptor_errors()
+        self.test_inspect_encrypted_backup_errors()
 
 
 if __name__ == '__main__':
