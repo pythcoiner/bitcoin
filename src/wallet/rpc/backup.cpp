@@ -10,6 +10,9 @@
 #include <key_io.h>
 #include <merkleblock.h>
 #include <node/types.h>
+#include <chainparams.h>
+#include <common/args.h>
+#include <outputtype.h>
 #include <rpc/util.h>
 #include <script/descriptor.h>
 #include <script/script.h>
@@ -663,4 +666,349 @@ RPCMethod restorewallet()
 },
     };
 }
+namespace {
+
+//! Map Core's internal chain type string to the bip-wallet-backup spec value.
+std::string ChainTypeToSpecNetwork(const std::string& chain_type)
+{
+    if (chain_type == "main") return "bitcoin";
+    if (chain_type == "test") return "testnet3";
+    if (chain_type == "testnet4") return "testnet4";
+    if (chain_type == "signet") return "signet";
+    if (chain_type == "regtest") return "regtest";
+    return chain_type;
+}
+
+struct DescInfo {
+    std::string descriptor;
+    uint64_t creation_time{0};
+    int64_t next_index{0};
+    int64_t range_start{0};
+    int64_t range_end{0};
+    bool is_range{false};
+    std::optional<OutputType> output_type;
+    uint256 id;
+};
+
+DescInfo CollectDescInfo(DescriptorScriptPubKeyMan& spk_man)
+{
+    LOCK(spk_man.cs_desc_man);
+    const auto& wd = spk_man.GetWalletDescriptor();
+    DescInfo info;
+    CHECK_NONFATAL(spk_man.GetDescriptorString(info.descriptor, /*priv=*/false));
+    info.creation_time = wd.creation_time;
+    info.next_index = wd.next_index;
+    info.range_start = wd.range_start;
+    info.range_end = wd.range_end;
+    info.is_range = wd.descriptor->IsRange();
+    info.output_type = wd.descriptor->GetOutputType();
+    info.id = spk_man.GetID();
+    return info;
+}
+
+UniValue BuildLabelsArray(const CWallet& wallet) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    UniValue labels(UniValue::VARR);
+    wallet.ForEachAddrBookEntry([&](const CTxDestination& dest, const std::string& label, bool is_change, const std::optional<AddressPurpose>& purpose) {
+        if (is_change) return;
+        if (label.empty()) return;
+        UniValue entry(UniValue::VOBJ);
+        entry.pushKV("type", "addr");
+        entry.pushKV("ref", EncodeDestination(dest));
+        entry.pushKV("label", label);
+        // Bitcoin Core extension: address purpose ("send"/"receive"). Not in BIP-329.
+        if (purpose) entry.pushKV("purpose", PurposeToString(*purpose));
+        labels.push_back(std::move(entry));
+    });
+    // Emit user-supplied transaction comments as BIP-329 type:"tx" records.
+    for (const auto& [_pos, pwtx] : wallet.wtxOrdered) {
+        const CWalletTx& wtx = *pwtx;
+        auto it = wtx.mapValue.find("comment");
+        if (it == wtx.mapValue.end() || it->second.empty()) continue;
+        UniValue entry(UniValue::VOBJ);
+        entry.pushKV("type", "tx");
+        entry.pushKV("ref", wtx.GetHash().GetHex());
+        entry.pushKV("label", it->second);
+        labels.push_back(std::move(entry));
+    }
+    return labels;
+}
+
+UniValue BuildTransactionsArray(const CWallet& wallet) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    UniValue txs(UniValue::VARR);
+    for (const auto& [_pos, pwtx] : wallet.wtxOrdered) {
+        const CWalletTx& wtx = *pwtx;
+        UniValue entry(UniValue::VOBJ);
+        entry.pushKV("txid", wtx.GetHash().GetHex());
+        entry.pushKV("wtxid", wtx.GetWitnessHash().GetHex());
+        entry.pushKV("hex", EncodeHexTx(*wtx.tx));
+        entry.pushKV("time", wtx.GetTxTime());
+        entry.pushKV("time_received", int64_t{wtx.nTimeReceived});
+        if (auto* conf = wtx.state<TxStateConfirmed>()) {
+            entry.pushKV("blockhash", conf->confirmed_block_hash.GetHex());
+            entry.pushKV("blockheight", conf->confirmed_block_height);
+            entry.pushKV("blockindex", conf->position_in_block);
+        }
+        entry.pushKV("abandoned", wtx.isAbandoned());
+        txs.push_back(std::move(entry));
+    }
+    return txs;
+}
+
+UniValue BuildWalletFlagsArray(const CWallet& wallet)
+{
+    UniValue flags(UniValue::VARR);
+    const uint64_t wallet_flags = wallet.GetWalletFlags();
+    for (uint64_t i = 0; i < 64; ++i) {
+        const uint64_t flag = uint64_t{1} << i;
+        if (!(flag & wallet_flags)) continue;
+        if (flag & KNOWN_WALLET_FLAGS) {
+            flags.push_back(WALLET_FLAG_TO_STRING.at(WalletFlags{flag}));
+        }
+    }
+    return flags;
+}
+
+//! Read the bitcoin.conf file and return its content with credential-bearing
+//! settings stripped. Returns std::nullopt if no config file is in use.
+std::optional<std::string> ReadSanitizedConfigFile()
+{
+    static const std::set<std::string> kSensitiveKeys{
+        "rpcpassword",
+        "rpcauth",
+        "rpcuser",
+        "torpassword",
+        "tor",
+        "onion",
+        "i2psam",
+        "proxy",
+        "externalip",
+    };
+
+    const fs::path conf_path = gArgs.GetConfigFilePath();
+    std::ifstream in{conf_path.std_path()};
+    if (!in.is_open()) return std::nullopt;
+
+    std::string out;
+    std::string line;
+    while (std::getline(in, line)) {
+        // Find the key on this line, ignoring leading whitespace and section
+        // headers ([main], [test], ...).
+        std::string trimmed = line;
+        size_t start = trimmed.find_first_not_of(" \t");
+        bool sensitive = false;
+        if (start != std::string::npos && trimmed[start] != '#' && trimmed[start] != '[') {
+            const size_t eq = trimmed.find('=', start);
+            if (eq != std::string::npos) {
+                std::string key = trimmed.substr(start, eq - start);
+                // Strip optional "section." prefix.
+                if (const size_t dot = key.find('.'); dot != std::string::npos) {
+                    key = key.substr(dot + 1);
+                }
+                // Trim trailing whitespace from the key.
+                while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) key.pop_back();
+                if (kSensitiveKeys.count(key)) sensitive = true;
+            }
+        }
+        if (sensitive) {
+            out += "# [redacted by exportwalletbackup]\n";
+        } else {
+            out += line;
+            out += '\n';
+        }
+    }
+    return out;
+}
+
+//! Build the accounts[] array. Pairs each external descriptor SPKM with the
+//! matching internal SPKM of the same OutputType (when both exist), so a
+//! single account exposes a receive descriptor + change descriptor.
+UniValue BuildAccountsArray(const CWallet& wallet) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    const auto active_spk_mans = wallet.GetActiveScriptPubKeyMans();
+
+    struct Slot { DescriptorScriptPubKeyMan* recv{nullptr}; DescriptorScriptPubKeyMan* change{nullptr}; };
+    std::map<OutputType, Slot> active_by_type;
+    std::vector<DescriptorScriptPubKeyMan*> orphans; // inactive or untyped
+
+    for (auto* spk_man : wallet.GetAllScriptPubKeyMans()) {
+        auto* desc = dynamic_cast<DescriptorScriptPubKeyMan*>(spk_man);
+        if (!desc) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "exportwalletbackup: only descriptor wallets are supported");
+        }
+        const bool is_active = active_spk_mans.contains(desc);
+        std::optional<OutputType> ot;
+        {
+            LOCK(desc->cs_desc_man);
+            ot = desc->GetWalletDescriptor().descriptor->GetOutputType();
+        }
+        const auto internal = wallet.IsInternalScriptPubKeyMan(desc);
+        if (is_active && ot && internal.has_value()) {
+            auto& slot = active_by_type[*ot];
+            (internal.value() ? slot.change : slot.recv) = desc;
+        } else {
+            orphans.push_back(desc);
+        }
+    }
+
+    UniValue accounts(UniValue::VARR);
+
+    auto emit = [&](DescriptorScriptPubKeyMan* recv, DescriptorScriptPubKeyMan* change, bool active) {
+        UniValue acc(UniValue::VOBJ);
+        acc.pushKV("type", "bip_380");
+        acc.pushKV("active", active);
+
+        std::optional<DescInfo> recv_info;
+        std::optional<DescInfo> change_info;
+        if (recv) recv_info = CollectDescInfo(*recv);
+        if (change) change_info = CollectDescInfo(*change);
+
+        if (recv_info) {
+            acc.pushKV("descriptor", recv_info->descriptor);
+            acc.pushKV("descriptor_id", recv_info->id.GetHex());
+            acc.pushKV("receive_index", recv_info->next_index);
+            if (recv_info->is_range) {
+                acc.pushKV("receive_range_start", recv_info->range_start);
+                acc.pushKV("receive_range_end", recv_info->range_end);
+            }
+        }
+        if (change_info) {
+            acc.pushKV("change_descriptor", change_info->descriptor);
+            acc.pushKV("change_descriptor_id", change_info->id.GetHex());
+            acc.pushKV("change_index", change_info->next_index);
+            if (change_info->is_range) {
+                acc.pushKV("change_range_start", change_info->range_start);
+                acc.pushKV("change_range_end", change_info->range_end);
+            }
+        }
+
+        // Account-level timestamp = oldest creation_time across the paired descriptors,
+        // so the import side can rescan from a safe lower bound.
+        std::optional<uint64_t> ts;
+        if (recv_info) ts = recv_info->creation_time;
+        if (change_info) ts = ts ? std::min(*ts, change_info->creation_time) : change_info->creation_time;
+        if (ts) {
+            acc.pushKV("timestamp", static_cast<int64_t>(*ts));
+            acc.pushKV("iso_8601_datetime", FormatISO8601DateTime(static_cast<int64_t>(*ts)));
+            // Best-effort block_height: first block at-or-after the descriptor's
+            // creation time. Lets an importer rescan from a tighter lower bound
+            // than rescanning the whole chain.
+            int height = 0;
+            if (wallet.chain().findFirstBlockWithTimeAndHeight(static_cast<int64_t>(*ts), /*min_height=*/0, FoundBlock().height(height))) {
+                // Step one block back as a safety margin against clock skew, so an
+                // importer rescanning from `block_height` cannot miss a same-second tx.
+                acc.pushKV("block_height", std::max(0, height - 1));
+            }
+        }
+
+        // Output type — should match between receive and change in practice.
+        std::optional<OutputType> ot = recv_info ? recv_info->output_type : change_info->output_type;
+        if (ot) acc.pushKV("output_type", FormatOutputType(*ot));
+
+        accounts.push_back(std::move(acc));
+    };
+
+    for (auto& [_ot, slot] : active_by_type) {
+        emit(slot.recv, slot.change, /*active=*/true);
+    }
+    for (auto* desc : orphans) {
+        emit(desc, nullptr, /*active=*/false);
+    }
+    return accounts;
+}
+
+UniValue BuildBackupJson(const CWallet& wallet, const std::string& chain_type)
+{
+    UniValue root(UniValue::VOBJ);
+    root.pushKV("version", 1);
+    root.pushKV("name", wallet.GetName());
+    root.pushKV("network", ChainTypeToSpecNetwork(chain_type));
+    // Last block the wallet has processed — useful for an importer to know the
+    // safe rescan upper bound. Spec field at the account level; Core only
+    // tracks it per-wallet, so we surface it at the root.
+    if (wallet.GetLastBlockHeight() >= 0) {
+        root.pushKV("last_height", wallet.GetLastBlockHeight());
+    }
+    // Bitcoin Core extension: wallet-level flags (e.g. avoid_reuse,
+    // disable_private_keys, descriptor_wallet). Proposed for the spec.
+    root.pushKV("wallet_flags", BuildWalletFlagsArray(wallet));
+    // Bitcoin Core extension: bitcoin.conf content with credential-bearing
+    // settings stripped (rpcpassword, rpcauth, tor passwords, ...).
+    if (auto conf = ReadSanitizedConfigFile()) {
+        root.pushKV("bitcoin_conf", *conf);
+    }
+    root.pushKV("accounts", BuildAccountsArray(wallet));
+    root.pushKV("bip329_labels", BuildLabelsArray(wallet));
+    root.pushKV("transactions", BuildTransactionsArray(wallet));
+
+    return root;
+}
+
+} // namespace
+
+RPCMethod exportwalletbackup()
+{
+    return RPCMethod{
+        "exportwalletbackup",
+        "Export a descriptor wallet's metadata as JSON conforming to the bip-wallet-backup format.\n"
+        "Does NOT include private keys, mnemonics, or PSBTs.\n"
+        "If a path is provided, the JSON is written to that file (which must not already exist) and the RPC returns null.\n"
+        "Otherwise, the JSON object is returned directly.\n"
+        "\nThis RPC emits some Bitcoin Core extension fields beyond the spec (output_type, change_descriptor, descriptor_id, address purpose) which we propose adding to the BIP.\n",
+        {
+            {"path", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "If given, write the JSON backup to this file path."},
+        },
+        {
+            RPCResult{"if path is omitted",
+                RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", ""}}},
+            RPCResult{"if path is provided",
+                RPCResult::Type::NONE, "", ""},
+        },
+        RPCExamples{
+            HelpExampleCli("exportwalletbackup", "")
+            + HelpExampleCli("exportwalletbackup", "\"/tmp/backup.json\"")
+            + HelpExampleRpc("exportwalletbackup", "")
+        },
+        [](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
+{
+    const std::shared_ptr<const CWallet> pwallet = GetWalletForJSONRPCRequest(request);
+    if (!pwallet) return UniValue::VNULL;
+
+    if (!pwallet->IsWalletFlagSet(WALLET_FLAG_DESCRIPTORS)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "exportwalletbackup is only supported for descriptor wallets");
+    }
+
+    const std::string chain_type = Params().GetChainTypeString();
+
+    pwallet->BlockUntilSyncedToCurrentChain();
+
+    UniValue backup;
+    {
+        LOCK(pwallet->cs_wallet);
+        backup = BuildBackupJson(*pwallet, chain_type);
+    }
+
+    if (request.params[0].isNull()) {
+        return backup;
+    }
+
+    fs::path filepath = fs::absolute(fs::u8path(request.params[0].get_str()));
+    if (fs::exists(filepath)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, filepath.utf8string() + " already exists. If you are sure this is what you want, move it out of the way first");
+    }
+    std::ofstream file{filepath.std_path()};
+    if (!file.is_open()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Cannot open wallet backup file " + filepath.utf8string());
+    }
+    file << backup.write(/*prettyIndent=*/2);
+    file.close();
+    if (file.fail()) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "Failed to write wallet backup to " + filepath.utf8string());
+    }
+    return UniValue::VNULL;
+},
+    };
+}
+
 } // namespace wallet
