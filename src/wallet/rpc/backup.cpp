@@ -14,6 +14,7 @@
 #include <common/args.h>
 #include <outputtype.h>
 #include <rpc/util.h>
+#include <wallet/context.h>
 #include <script/descriptor.h>
 #include <script/script.h>
 #include <script/solver.h>
@@ -918,7 +919,7 @@ UniValue BuildAccountsArray(const CWallet& wallet) EXCLUSIVE_LOCKS_REQUIRED(wall
     return accounts;
 }
 
-UniValue BuildBackupJson(const CWallet& wallet, const std::string& chain_type)
+UniValue BuildBackupJson(const CWallet& wallet, const std::string& chain_type) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
 {
     UniValue root(UniValue::VOBJ);
     root.pushKV("version", 1);
@@ -1007,6 +1008,356 @@ RPCMethod exportwalletbackup()
         throw JSONRPCError(RPC_WALLET_ERROR, "Failed to write wallet backup to " + filepath.utf8string());
     }
     return UniValue::VNULL;
+},
+    };
+}
+
+namespace {
+
+//! Load the backup JSON from either a filesystem path or an inline JSON object
+//! string. A leading '{' is treated as inline JSON; anything else is a path.
+UniValue LoadBackupSource(const std::string& source)
+{
+    std::string payload;
+    size_t first_nonws = source.find_first_not_of(" \t\r\n");
+    if (first_nonws != std::string::npos && source[first_nonws] == '{') {
+        payload = source;
+    } else {
+        fs::path filepath = fs::absolute(fs::u8path(source));
+        if (!fs::exists(filepath)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Backup file not found: " + filepath.utf8string());
+        }
+        std::ifstream in{filepath.std_path(), std::ios::binary};
+        if (!in.is_open()) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Cannot open backup file: " + filepath.utf8string());
+        }
+        std::stringstream ss;
+        ss << in.rdbuf();
+        payload = ss.str();
+    }
+    UniValue backup;
+    if (!backup.read(payload)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Backup content is not valid JSON");
+    }
+    if (!backup.isObject()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Backup root must be a JSON object");
+    }
+    return backup;
+}
+
+//! Build a single ProcessDescriptorImport request UniValue for one side
+//! (external or change) of an account, based on the exported fields.
+UniValue BuildDescriptorRequest(const UniValue& account, bool internal, int64_t fallback_timestamp)
+{
+    const std::string desc_key = internal ? "change_descriptor" : "descriptor";
+    const std::string index_key = internal ? "change_index" : "receive_index";
+    const std::string range_start_key = internal ? "change_range_start" : "range_start";
+    const std::string range_end_key = internal ? "change_range_end" : "range_end";
+    // Back-compat: the exporter historically used `receive_range_*` for the
+    // external side; accept both.
+    const std::string alt_range_start_key = internal ? "change_range_start" : "receive_range_start";
+    const std::string alt_range_end_key = internal ? "change_range_end" : "receive_range_end";
+
+    UniValue req(UniValue::VOBJ);
+    req.pushKV("desc", account[desc_key].get_str());
+    req.pushKV("active", account.exists("active") ? account["active"].get_bool() : true);
+    req.pushKV("internal", internal);
+
+    int64_t ts = fallback_timestamp;
+    if (account.exists("timestamp") && account["timestamp"].isNum()) {
+        ts = account["timestamp"].getInt<int64_t>();
+    }
+    req.pushKV("timestamp", ts);
+
+    // Range: prefer explicit fields, otherwise derive from next index.
+    int64_t range_start = 0;
+    int64_t range_end = 0;
+    if (account.exists(range_start_key) || account.exists(alt_range_start_key)) {
+        range_start = account.exists(range_start_key) ? account[range_start_key].getInt<int64_t>()
+                                                      : account[alt_range_start_key].getInt<int64_t>();
+    }
+    if (account.exists(range_end_key) || account.exists(alt_range_end_key)) {
+        range_end = account.exists(range_end_key) ? account[range_end_key].getInt<int64_t>()
+                                                  : account[alt_range_end_key].getInt<int64_t>();
+    }
+    int64_t next_index = 0;
+    if (account.exists(index_key) && account[index_key].isNum()) {
+        next_index = account[index_key].getInt<int64_t>();
+    }
+    if (range_end <= 0) {
+        // Spec minimum: cover at least up to next_index plus the default keypool lookahead.
+        range_end = std::max<int64_t>(next_index, 0);
+    }
+    if (range_end < next_index) range_end = next_index;
+    // ProcessDescriptorImport's ParseDescriptorRange takes a [begin, end] inclusive pair.
+    UniValue range(UniValue::VARR);
+    range.push_back(range_start);
+    range.push_back(range_end);
+    req.pushKV("range", std::move(range));
+    if (next_index > range_start) {
+        req.pushKV("next_index", next_index);
+    }
+    return req;
+}
+
+//! Inject one transaction from the backup's transactions[] entry into the
+//! wallet, if its address already matches an imported descriptor. Returns true
+//! on success (including "already present"), false if the entry was unusable.
+bool InjectBackupTransaction(CWallet& wallet, const UniValue& entry, std::string& err) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    if (!entry.exists("hex")) {
+        err = "tx entry missing hex";
+        return false;
+    }
+    CMutableTransaction mtx;
+    if (!DecodeHexTx(mtx, entry["hex"].get_str())) {
+        err = "tx hex decode failed";
+        return false;
+    }
+    CTransactionRef tx_ref = MakeTransactionRef(std::move(mtx));
+
+    TxState state = TxStateInactive{};
+    if (entry.exists("blockhash") && entry.exists("blockheight") && entry.exists("blockindex")) {
+        const uint256 blockhash{ParseHashV(entry["blockhash"], "blockhash")};
+        bool in_active_chain = false;
+        int confirmed_height = -1;
+        if (!wallet.chain().findBlock(blockhash, FoundBlock().inActiveChain(in_active_chain).height(confirmed_height)) || !in_active_chain) {
+            err = "tx confirming block is not in the active chain";
+            return false;
+        }
+        state = TxStateConfirmed{
+            blockhash,
+            entry["blockheight"].getInt<int>(),
+            entry["blockindex"].getInt<int>(),
+        };
+    }
+    if (!wallet.IsMine(*tx_ref)) {
+        err = "tx does not belong to any imported descriptor";
+        return false;
+    }
+    wallet.AddToWallet(std::move(tx_ref), state);
+    return true;
+}
+
+} // namespace
+
+RPCMethod importwalletbackup()
+{
+    return RPCMethod{
+        "importwalletbackup",
+        "Create a new wallet and import a bip-wallet-backup JSON into it.\n"
+        "The destination wallet is always newly created and watch-only (no private keys).\n"
+        "\nRescan modes:\n"
+        "  \"auto\"  (default) - inject transactions[] directly, then rescan from last_height if present.\n"
+        "  \"force\" - always rescan from the earliest account timestamp, ignoring transactions[] as authoritative.\n"
+        "  \"none\"  - do not rescan. Only descriptors, labels, and transactions[] are restored.\n",
+        {
+            {"source", RPCArg::Type::STR, RPCArg::Optional::NO, "Either a filesystem path to a JSON file, or the JSON object itself as a string."},
+            {"wallet_name", RPCArg::Type::STR, RPCArg::Optional::NO, "Name to give the newly-created wallet. Must not already exist."},
+            {"rescan", RPCArg::Type::STR, RPCArg::Default{"auto"}, "Rescan strategy: \"auto\", \"force\", or \"none\"."},
+            {"load_on_startup", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Save wallet name to persistent settings and load on startup."},
+        },
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::STR, "name", "The new wallet's name."},
+                {RPCResult::Type::ARR, "warnings", /*optional=*/true, "", {{RPCResult::Type::STR, "", ""}}},
+            }
+        },
+        RPCExamples{
+            HelpExampleCli("importwalletbackup", "\"/tmp/backup.json\" \"restored\"")
+            + HelpExampleRpc("importwalletbackup", "\"/tmp/backup.json\", \"restored\"")
+        },
+        [](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
+{
+    WalletContext& context = EnsureWalletContext(request.context);
+
+    // 1. Parse + validate the backup JSON up-front so we never create a wallet
+    // for a malformed backup.
+    UniValue backup = LoadBackupSource(request.params[0].get_str());
+
+    if (backup.exists("version") && backup["version"].isNum() && backup["version"].getInt<int>() != 1) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Unsupported backup version %d (expected 1)", backup["version"].getInt<int>()));
+    }
+    if (backup.exists("network") && backup["network"].isStr()) {
+        const std::string expected = ChainTypeToSpecNetwork(Params().GetChainTypeString());
+        if (backup["network"].get_str() != expected) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Backup network \"%s\" does not match current network \"%s\"", backup["network"].get_str(), expected));
+        }
+    }
+    if (!backup.exists("accounts") || !backup["accounts"].isArray() || backup["accounts"].empty()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Backup has no accounts to import");
+    }
+
+    // 2. Parse RPC args.
+    const std::string wallet_name = request.params[1].get_str();
+    std::string rescan_mode = "auto";
+    if (!request.params[2].isNull()) {
+        rescan_mode = request.params[2].get_str();
+        if (rescan_mode != "auto" && rescan_mode != "force" && rescan_mode != "none") {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "rescan must be one of \"auto\", \"force\", \"none\"");
+        }
+    }
+    std::optional<bool> load_on_start = request.params[3].isNull() ? std::nullopt : std::optional<bool>(request.params[3].get_bool());
+
+    // 3. Determine earliest timestamp across accounts (rescan lower bound).
+    int64_t earliest_ts = std::numeric_limits<int64_t>::max();
+    for (const UniValue& acc : backup["accounts"].getValues()) {
+        if (acc.exists("timestamp") && acc["timestamp"].isNum()) {
+            earliest_ts = std::min(earliest_ts, acc["timestamp"].getInt<int64_t>());
+        }
+    }
+    if (earliest_ts == std::numeric_limits<int64_t>::max()) earliest_ts = 1;
+
+    // 4. Create the destination wallet (watch-only, descriptor). The pruned
+    // guard is handled post-rescan by RescanFromTime, which reports a clear
+    // error covering both pruning and assumeutxo cases — matching the
+    // importdescriptors behavior.
+    DatabaseOptions options;
+    DatabaseStatus status;
+    ReadDatabaseArgs(*context.args, options);
+    options.require_create = true;
+    options.create_flags = WALLET_FLAG_DESCRIPTORS | WALLET_FLAG_DISABLE_PRIVATE_KEYS | WALLET_FLAG_BLANK_WALLET;
+    bilingual_str err;
+    std::vector<bilingual_str> warnings;
+    const std::shared_ptr<CWallet> pwallet = CreateWallet(context, wallet_name, load_on_start, options, status, err, warnings);
+    HandleWalletError(pwallet, status, err);
+
+    UniValue per_account_results(UniValue::VARR);
+
+    // 6. Import descriptors via the existing ProcessDescriptorImport helper.
+    WalletRescanReserver reserver(*pwallet);
+    if (!reserver.reserve(/*with_passphrase=*/false)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "Wallet is currently rescanning. Abort existing rescan or wait.");
+    }
+    {
+        LOCK(pwallet->cs_wallet);
+        int64_t now = 0;
+        CHECK_NONFATAL(pwallet->chain().findBlock(pwallet->GetLastBlockHash(), FoundBlock().mtpTime(now)));
+
+        for (const UniValue& acc : backup["accounts"].getValues()) {
+            if (!acc.exists("descriptor")) {
+                per_account_results.push_back("account skipped: missing \"descriptor\"");
+                continue;
+            }
+            UniValue recv_req = BuildDescriptorRequest(acc, /*internal=*/false, now);
+            int64_t ts = std::max<int64_t>(1, GetImportTimestamp(recv_req, now));
+            per_account_results.push_back(ProcessDescriptorImport(*pwallet, recv_req, ts));
+            if (acc.exists("change_descriptor")) {
+                UniValue change_req = BuildDescriptorRequest(acc, /*internal=*/true, now);
+                int64_t ts2 = std::max<int64_t>(1, GetImportTimestamp(change_req, now));
+                per_account_results.push_back(ProcessDescriptorImport(*pwallet, change_req, ts2));
+            }
+        }
+        pwallet->ConnectScriptPubKeyManNotifiers();
+        pwallet->RefreshAllTXOs();
+
+        // 7. Inject transactions[] before any rescan so the rescan only has to
+        // cover the gap between the backup and the current tip.
+        int injected = 0;
+        int skipped = 0;
+        if (backup.exists("transactions") && backup["transactions"].isArray()) {
+            for (const UniValue& entry : backup["transactions"].getValues()) {
+                std::string tx_err;
+                if (InjectBackupTransaction(*pwallet, entry, tx_err)) {
+                    ++injected;
+                } else {
+                    ++skipped;
+                }
+            }
+        }
+        if (injected > 0) warnings.emplace_back(Untranslated(strprintf("Injected %d transaction(s) from backup", injected)));
+        if (skipped > 0) warnings.emplace_back(Untranslated(strprintf("Skipped %d transaction(s) from backup", skipped)));
+
+        // 8. Apply BIP-329 labels.
+        if (backup.exists("bip329_labels") && backup["bip329_labels"].isArray()) {
+            int label_addr = 0;
+            int label_tx = 0;
+            int label_skipped = 0;
+            for (const UniValue& entry : backup["bip329_labels"].getValues()) {
+                if (!entry.exists("type") || !entry.exists("ref") || !entry.exists("label")) {
+                    ++label_skipped;
+                    continue;
+                }
+                const std::string type = entry["type"].get_str();
+                const std::string ref = entry["ref"].get_str();
+                const std::string label = entry["label"].get_str();
+                if (type == "addr") {
+                    CTxDestination dest = DecodeDestination(ref);
+                    if (!IsValidDestination(dest)) {
+                        ++label_skipped;
+                        continue;
+                    }
+                    std::optional<AddressPurpose> purpose;
+                    if (entry.exists("purpose") && entry["purpose"].isStr()) {
+                        purpose = PurposeFromString(entry["purpose"].get_str());
+                    }
+                    pwallet->SetAddressBook(dest, label, purpose);
+                    ++label_addr;
+                } else if (type == "tx") {
+                    Txid txid{Txid::FromUint256(ParseHashV(UniValue{ref}, "ref"))};
+                    if (pwallet->mapWallet.count(txid) == 0) {
+                        ++label_skipped;
+                        continue;
+                    }
+                    CTransactionRef tx_ref = pwallet->mapWallet.at(txid).tx;
+                    pwallet->AddToWallet(tx_ref, pwallet->mapWallet.at(txid).m_state,
+                        [&label](CWalletTx& wtx, bool /*new_tx*/) {
+                            wtx.mapValue["comment"] = label;
+                            return true;
+                        });
+                    ++label_tx;
+                } else {
+                    ++label_skipped;
+                }
+            }
+            if (label_addr > 0) warnings.emplace_back(Untranslated(strprintf("Applied %d address label(s)", label_addr)));
+            if (label_tx > 0) warnings.emplace_back(Untranslated(strprintf("Applied %d tx label(s)", label_tx)));
+            if (label_skipped > 0) warnings.emplace_back(Untranslated(strprintf("Skipped %d label entry(ies)", label_skipped)));
+        }
+    }
+
+    // 9. Rescan, driven by the user's mode.
+    if (rescan_mode != "none") {
+        int64_t scan_from = earliest_ts;
+        if (rescan_mode == "auto" && backup.exists("last_height") && backup["last_height"].isNum()) {
+            const int last_height = backup["last_height"].getInt<int>();
+            int64_t last_height_time = 0;
+            {
+                LOCK(pwallet->cs_wallet);
+                if (pwallet->chain().findAncestorByHeight(pwallet->GetLastBlockHash(), last_height, FoundBlock().time(last_height_time))) {
+                    scan_from = std::max(scan_from, last_height_time);
+                }
+            }
+        }
+        const int64_t scanned_time = pwallet->RescanFromTime(scan_from, reserver, /*update=*/true);
+        if (pwallet->IsAbortingRescan()) {
+            throw JSONRPCError(RPC_MISC_ERROR, "Rescan aborted by user.");
+        }
+        if (scanned_time > scan_from) {
+            std::string msg = strprintf("Rescan started from time %d instead of %d", scanned_time, scan_from);
+            if (pwallet->chain().havePruned()) {
+                msg += " (node is pruned; some history may be missing — re-index with -reindex to recover)";
+            } else if (pwallet->chain().hasAssumedValidChain()) {
+                msg += " (assumeutxo background sync in progress; retry later)";
+            }
+            warnings.emplace_back(Untranslated(msg));
+        }
+        pwallet->ResubmitWalletTransactions(node::TxBroadcast::MEMPOOL_NO_BROADCAST, /*force=*/true);
+    } else {
+        warnings.emplace_back(Untranslated("rescan=\"none\": historical transactions not covered by transactions[] will be missing"));
+    }
+
+    UniValue obj(UniValue::VOBJ);
+    obj.pushKV("name", pwallet->GetName());
+    // Surface per-account import errors as warnings so the caller sees them.
+    for (const UniValue& r : per_account_results.getValues()) {
+        if (r.isObject() && r.exists("success") && !r["success"].get_bool() && r.exists("error")) {
+            warnings.emplace_back(Untranslated(r["error"]["message"].get_str()));
+        }
+    }
+    PushWarnings(warnings, obj);
+    return obj;
 },
     };
 }

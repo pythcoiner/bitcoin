@@ -359,6 +359,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "restorewallet", 0, "wallet_name", ParamFormat::STRING },
     { "restorewallet", 1, "backup_file", ParamFormat::STRING },
     { "restorewallet", 2, "load_on_startup"},
+    { "importwalletbackup", 3, "load_on_startup"},
     { "loadwallet", 0, "filename", ParamFormat::STRING },
     { "loadwallet", 1, "load_on_startup"},
     { "unloadwallet", 0, "wallet_name", ParamFormat::STRING },

@@ -300,6 +300,7 @@ BASE_SCRIPTS = [
     'wallet_listsinceblock.py',
     'wallet_listdescriptors.py',
     'wallet_export_backup.py',
+    'wallet_import_backup.py',
     'p2p_leak.py',
     'wallet_encryption.py',
     'feature_dersig.py',
