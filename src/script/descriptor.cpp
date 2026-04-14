@@ -1754,25 +1754,13 @@ enum class ParseScriptContext {
 std::optional<uint32_t> ParseKeyPathNum(std::span<const char> elem, bool& apostrophe, std::string& error, bool& has_hardened)
 {
     bool hardened = false;
-    if (elem.size() > 0) {
-        const char last = elem[elem.size() - 1];
-        if (last == '\'' || last == 'h') {
-            elem = elem.first(elem.size() - 1);
-            hardened = true;
-            apostrophe = last == '\'';
-        }
+    const auto index{ParseKeyPathElement(elem, hardened, error)};
+    if (!index.has_value()) return std::nullopt;
+    if (hardened) {
+        has_hardened = true;
+        apostrophe = elem.back() == '\'';
     }
-    const auto p{ToIntegral<uint32_t>(std::string_view{elem.begin(), elem.end()})};
-    if (!p) {
-        error = strprintf("Key path value '%s' is not a valid uint32", std::string_view{elem.begin(), elem.end()});
-        return std::nullopt;
-    } else if (*p > 0x7FFFFFFFUL) {
-        error = strprintf("Key path value %u is out of range", *p);
-        return std::nullopt;
-    }
-    has_hardened = has_hardened || hardened;
-
-    return std::make_optional<uint32_t>(*p | (((uint32_t)hardened) << 31));
+    return *index | (hardened ? BIP32_HARDENED : BIP32_UNHARDENED);
 }
 
 /**
