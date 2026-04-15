@@ -257,6 +257,33 @@ std::optional<std::vector<uint8_t>> DecryptChaCha20Poly1305(std::span<const uint
                                                             std::span<const uint8_t, AEADChaCha20Poly1305::NONCE_SIZE> nonce);
 
 /**
+ * Create an encrypted backup from public keys and plaintext payload.
+ *
+ * @param[in] keys Normalized x-only public keys (used to derive encryption key)
+ * @param[in] plaintext The data to encrypt (typically the descriptor itself or labels)
+ * @param[in] content Content type metadata
+ * @param[in] derivation_paths Optional derivation paths to include
+ * @return The encrypted backup structure, or error message
+ */
+util::Result<EncryptedBackup> CreateEncryptedBackup(
+    const std::vector<uint256>& keys,
+    std::span<const uint8_t> plaintext,
+    const EncryptedBackupContent& content,
+    const std::vector<DerivationPath>& derivation_paths = {});
+
+/**
+ * Like CreateEncryptedBackup(), but uses a caller-supplied nonce instead of
+ * generating a random one. Intended for tests / test-vector verification.
+ */
+util::Result<EncryptedBackup> CreateEncryptedBackupWithNonce(
+    const std::vector<uint256>& keys,
+    std::span<const uint8_t> plaintext,
+    const EncryptedBackupContent& content,
+    const std::vector<DerivationPath>& derivation_paths,
+    const std::array<uint8_t, AEADChaCha20Poly1305::NONCE_SIZE>& nonce,
+    bool allow_empty_derivation_paths = false);
+
+/**
  * Encode an encrypted backup to binary format.
  *
  * @param[in] backup The backup structure to encode
@@ -287,6 +314,29 @@ util::Result<EncryptedBackup> DecodeEncryptedBackup(std::span<const uint8_t> dat
  * @return The backup structure, or error message
  */
 util::Result<EncryptedBackup> DecodeEncryptedBackupBase64(const std::string& base64_str);
+
+/**
+ * Attempt to decrypt an encrypted backup using a single public key.
+ *
+ * Tries to reconstruct the decryption secret using the individual secrets
+ * in the backup and the provided key.
+ *
+ * @param[in] backup The encrypted backup
+ * @param[in] key The normalized x-only public key to try
+ * @return Pair of (decrypted plaintext, content metadata), or nullopt if key doesn't match or decryption fails
+ */
+std::optional<std::pair<std::vector<uint8_t>, EncryptedBackupContent>> DecryptBackupWithKey(const EncryptedBackup& backup,
+                                                                                            const uint256& key);
+
+/**
+ * Attempt to decrypt an encrypted backup using any matching key from a descriptor.
+ *
+ * @param[in] backup The encrypted backup
+ * @param[in] descriptor A descriptor containing potential decryption keys
+ * @return Pair of (decrypted plaintext, content metadata), or error message
+ */
+util::Result<std::pair<std::vector<uint8_t>, EncryptedBackupContent>> DecryptBackupWithDescriptor(const EncryptedBackup& backup,
+                                                                                                  const std::string& descriptor);
 
 } // namespace wallet
 

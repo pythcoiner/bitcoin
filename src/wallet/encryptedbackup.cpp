@@ -559,4 +559,119 @@ util::Result<EncryptedBackup> DecodeEncryptedBackupBase64(const std::string& bas
     return DecodeEncryptedBackup(*decoded);
 }
 
+util::Result<EncryptedBackup> CreateEncryptedBackupWithNonce(
+    const std::vector<uint256>& keys,
+    std::span<const uint8_t> plaintext,
+    const EncryptedBackupContent& content,
+    const std::vector<DerivationPath>& derivation_paths,
+    const std::array<uint8_t, AEADChaCha20Poly1305::NONCE_SIZE>& nonce,
+    bool allow_empty_derivation_paths)
+{
+    if (plaintext.empty()) {
+        return util::Error{Untranslated("Plaintext cannot be empty")};
+    }
+
+    if (keys.empty()) {
+        return util::Error{Untranslated("Keys cannot be empty")};
+    }
+
+    if (nonce == std::array<uint8_t, AEADChaCha20Poly1305::NONCE_SIZE>{}) {
+        return util::Error{Untranslated("Nonce cannot be zero")};
+    }
+
+    if (!allow_empty_derivation_paths && derivation_paths.empty()) {
+        return util::Error{Untranslated("Derivation paths cannot be empty")};
+    }
+
+    // Compute secrets
+    uint256 decryption_secret = ComputeDecryptionSecret(keys);
+    std::vector<uint256> individual_secrets = ComputeAllIndividualSecrets(decryption_secret, keys);
+
+    // Encode content prefix
+    auto content_encoded = EncodeContent(content);
+    if (!content_encoded) {
+        return util::Error{util::ErrorString(content_encoded)};
+    }
+
+    // Build payload: CONTENT || PLAINTEXT
+    std::vector<uint8_t> payload;
+    payload.insert(payload.end(), content_encoded->begin(), content_encoded->end());
+    payload.insert(payload.end(), plaintext.begin(), plaintext.end());
+
+    // Encrypt
+    std::vector<uint8_t> ciphertext = EncryptChaCha20Poly1305(payload, decryption_secret, nonce);
+
+    // Sort and deduplicate derivation paths (reference encoder uses a BTreeSet).
+    std::set<DerivationPath> unique_paths(derivation_paths.begin(), derivation_paths.end());
+
+    // Build result
+    EncryptedBackup backup;
+    backup.version = ENCRYPTED_BACKUP_V1;
+    backup.derivation_paths.assign(unique_paths.begin(), unique_paths.end());
+    backup.individual_secrets = std::move(individual_secrets);
+    backup.encryption = EncryptionAlgorithm::CHACHA20_POLY1305;
+    backup.nonce = nonce;
+    backup.ciphertext = std::move(ciphertext);
+
+    return backup;
+}
+
+util::Result<EncryptedBackup> CreateEncryptedBackup(
+    const std::vector<uint256>& keys,
+    std::span<const uint8_t> plaintext,
+    const EncryptedBackupContent& content,
+    const std::vector<DerivationPath>& derivation_paths)
+{
+    std::array<uint8_t, AEADChaCha20Poly1305::NONCE_SIZE> nonce;
+    GetStrongRandBytes(nonce);
+    return CreateEncryptedBackupWithNonce(keys, plaintext, content, derivation_paths, nonce);
+}
+
+std::optional<std::pair<std::vector<uint8_t>, EncryptedBackupContent>> DecryptBackupWithKey(const EncryptedBackup& backup,
+                                                                                            const uint256& key)
+{
+    // Compute individual secret for this key
+    uint256 si = ComputeIndividualSecret(key);
+
+    // Try each individual secret in the backup
+    for (const auto& ci : backup.individual_secrets) {
+        // Reconstruct decryption secret: s = ci XOR si
+        uint256 reconstructed_secret = XorUint256(ci, si);
+
+        // Try to decrypt
+        auto result = DecryptChaCha20Poly1305(backup.ciphertext, reconstructed_secret, backup.nonce);
+        if (result) {
+            // Decryption succeeded - strip the content prefix and return plaintext.
+            // Per spec, content type 0x00 (reserved) and types >= 0x80 must be rejected;
+            // DecodeContent enforces this, so a decode failure means the backup is invalid.
+            auto content_result = DecodeContent(*result);
+            if (!content_result) continue;
+            size_t content_size = content_result->second;
+            if (content_size > result->size()) continue;
+            auto plaintext = std::vector<uint8_t>(result->begin() + content_size, result->end());
+            return std::make_pair(std::move(plaintext), content_result->first);
+        }
+    }
+
+    return std::nullopt;
+}
+
+util::Result<std::pair<std::vector<uint8_t>, EncryptedBackupContent>> DecryptBackupWithDescriptor(const EncryptedBackup& backup,
+                                                                                                  const std::string& descriptor)
+{
+    auto extract_result = ExtractKeysFromDescriptor(descriptor);
+    if (!extract_result) {
+        return util::Error{util::ErrorString(extract_result)};
+    }
+
+    for (const auto& key : extract_result->first) {
+        auto result = DecryptBackupWithKey(backup, key);
+        if (result) {
+            return *result;
+        }
+    }
+
+    return util::Error{Untranslated("No matching key found for decryption")};
+}
+
 } // namespace wallet

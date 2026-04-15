@@ -7,6 +7,7 @@
 #include <test/data/bip_encrypted_backup_chacha20poly1305_encryption.json.h>
 #include <test/data/bip_encrypted_backup_content_type.json.h>
 #include <test/data/bip_encrypted_backup_derivation_path.json.h>
+#include <test/data/bip_encrypted_backup_encrypted_backup.json.h>
 #include <test/data/bip_encrypted_backup_encryption_secret.json.h>
 #include <test/data/bip_encrypted_backup_individual_secrets.json.h>
 #include <test/data/bip_encrypted_backup_keys_types.json.h>
@@ -551,11 +552,9 @@ BOOST_AUTO_TEST_CASE(chacha20poly1305_vector_test)
         // enforce that rule; it lives at the CreateEncryptedBackup* layer, so
         // drive those cases through the high-level helper and assert failure.
         if (vec["ciphertext"].isNull()) {
-            std::string descriptor = "wpkh([d34db33f/84h/1h/0h]tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba/0/*)";
-            EncryptedBackupContent content;
-            content.type = ContentType::BIP_NUMBER;
-            content.bip_number = BIP_DESCRIPTORS;
-            auto result = CreateEncryptedBackupWithNonce(descriptor, plaintext, content, {}, nonce);
+            auto [dummy_keys, dummy_paths] = *ExtractKeysFromDescriptor("wpkh([d34db33f/84h/1h/0h]tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba/0/*)");
+            auto content = EncryptedBackupContent::Bip(BIP_DESCRIPTORS);
+            auto result = CreateEncryptedBackupWithNonce(dummy_keys, plaintext, content, dummy_paths, nonce);
             BOOST_CHECK_MESSAGE(!result,
                 description << ": CreateEncryptedBackupWithNonce must reject this input");
             continue;
@@ -599,6 +598,354 @@ BOOST_AUTO_TEST_CASE(chacha_decrypt_corrupted_test)
     BOOST_REQUIRE(DecryptChaCha20Poly1305(ct, secret, nonce).has_value());
     ct.back() ^= 0x01;
     BOOST_CHECK(!DecryptChaCha20Poly1305(ct, secret, nonce).has_value());
+}
+
+BOOST_AUTO_TEST_CASE(full_backup_roundtrip_test)
+{
+    // Test full backup creation and decryption with a real descriptor
+    // Use testnet tpub since we're running on RegTest
+    std::string descriptor = "wpkh([d34db33f/84h/1h/0h]tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba/0/*)";
+
+    // Create backup
+    auto content = EncryptedBackupContent::Bip(BIP_DESCRIPTORS);
+
+    std::vector<uint8_t> plaintext(descriptor.begin(), descriptor.end());
+
+    auto [keys, paths] = *ExtractKeysFromDescriptor(descriptor);
+
+    auto backup_result = CreateEncryptedBackup(keys, plaintext, content, paths);
+    BOOST_REQUIRE_MESSAGE(backup_result, util::ErrorString(backup_result).original);
+
+    // Encode to binary
+    auto encoded = EncodeEncryptedBackup(*backup_result);
+    BOOST_REQUIRE_MESSAGE(encoded, util::ErrorString(encoded).original);
+    BOOST_CHECK(!encoded->empty());
+
+    // Check magic bytes
+    BOOST_CHECK_EQUAL((*encoded)[0], 'B');
+    BOOST_CHECK_EQUAL((*encoded)[1], 'I');
+    BOOST_CHECK_EQUAL((*encoded)[2], 'P');
+
+    // Decode back
+    auto decoded_result = DecodeEncryptedBackup(*encoded);
+    BOOST_REQUIRE_MESSAGE(decoded_result, util::ErrorString(decoded_result).original);
+
+    // Decrypt using the same descriptor
+    auto decrypted = DecryptBackupWithDescriptor(*decoded_result, descriptor);
+    BOOST_REQUIRE_MESSAGE(decrypted, util::ErrorString(decrypted).original);
+
+    // Verify plaintext matches
+    std::string decrypted_str(decrypted->first.begin(), decrypted->first.end());
+    BOOST_CHECK_EQUAL(decrypted_str, descriptor);
+}
+
+BOOST_AUTO_TEST_CASE(base64_encoding_test)
+{
+    // Test base64 encoding roundtrip
+    // Use testnet tpub since we're running on RegTest
+    std::string descriptor = "wpkh([d34db33f/84h/1h/0h]tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba/0/*)";
+
+    auto content = EncryptedBackupContent::Bip(BIP_DESCRIPTORS);
+
+    std::vector<uint8_t> plaintext(descriptor.begin(), descriptor.end());
+
+    auto [keys, paths] = *ExtractKeysFromDescriptor(descriptor);
+
+    auto backup_result = CreateEncryptedBackup(keys, plaintext, content, paths);
+    BOOST_REQUIRE_MESSAGE(backup_result, util::ErrorString(backup_result).original);
+
+    // Encode to base64
+    auto base64_str = EncodeEncryptedBackupBase64(*backup_result);
+    BOOST_REQUIRE_MESSAGE(base64_str, util::ErrorString(base64_str).original);
+    BOOST_CHECK(!base64_str->empty());
+
+    // Decode from base64
+    auto decoded_result = DecodeEncryptedBackupBase64(*base64_str);
+    BOOST_REQUIRE_MESSAGE(decoded_result, util::ErrorString(decoded_result).original);
+
+    // Decrypt
+    auto decrypted = DecryptBackupWithDescriptor(*decoded_result, descriptor);
+    BOOST_REQUIRE_MESSAGE(decrypted, util::ErrorString(decrypted).original);
+
+    std::string decrypted_str(decrypted->first.begin(), decrypted->first.end());
+    BOOST_CHECK_EQUAL(decrypted_str, descriptor);
+}
+
+BOOST_AUTO_TEST_CASE(wrong_key_decryption_test)
+{
+    // Test that decryption fails with wrong key
+    // Use testnet tpub keys since we're running on RegTest
+    std::string descriptor1 = "wpkh([11111111/84h/1h/0h]tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba/0/*)";
+    std::string descriptor2 = "wpkh([22222222/84h/1h/0h]tpubDCBEcmVKbfC9KfdydyLbJ2gfNL88grZu1XcWSW9ytTM6fitvaRmVyr8Ddf7SjZ2ZfMx9RicjYAXhuh3fmLiVLPodPEqnQQURUfrBKiiVZc8/0/*)";
+
+    auto content = EncryptedBackupContent::Bip(BIP_DESCRIPTORS);
+
+    std::vector<uint8_t> plaintext(descriptor1.begin(), descriptor1.end());
+
+    // Create backup with descriptor1
+    auto [keys1, paths1] = *ExtractKeysFromDescriptor(descriptor1);
+    auto backup_result = CreateEncryptedBackup(keys1, plaintext, content, paths1);
+    BOOST_REQUIRE_MESSAGE(backup_result, util::ErrorString(backup_result).original);
+
+    // Try to decrypt with descriptor2 - should fail
+    auto decrypted = DecryptBackupWithDescriptor(*backup_result, descriptor2);
+    BOOST_CHECK_MESSAGE(!decrypted, "Decryption should fail with wrong key");
+}
+
+BOOST_AUTO_TEST_CASE(encrypted_backup_vector_test)
+{
+    UniValue vectors = read_json(json_tests::bip_encrypted_backup_encrypted_backup);
+
+    for (size_t i = 0; i < vectors.size(); ++i) {
+        const UniValue& vec = vectors[i];
+        std::string description = vec["description"].get_str();
+        BOOST_TEST_MESSAGE("Testing: " << description);
+
+        // Parse + normalize + sort keys.
+        std::vector<uint256> keys;
+        const UniValue& keys_arr = vec["keys"];
+        for (size_t j = 0; j < keys_arr.size(); ++j) {
+            auto bytes = ParseHex(keys_arr[j].get_str());
+            BOOST_REQUIRE_EQUAL(bytes.size(), 33u);
+            uint256 k;
+            std::memcpy(k.data(), bytes.data() + 1, 32);
+            keys.push_back(k);
+        }
+        std::sort(keys.begin(), keys.end());
+        keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+
+        // Derivation paths: sort + dedupe to match the reference encoder.
+        std::set<DerivationPath> path_set;
+        const UniValue& paths_arr = vec["derivation_paths"];
+        for (size_t j = 0; j < paths_arr.size(); ++j) {
+            auto p = ParseDerivationPath(paths_arr[j].get_str());
+            BOOST_REQUIRE(p);
+            path_set.insert(*p);
+        }
+        std::vector<DerivationPath> paths(path_set.begin(), path_set.end());
+
+        // Nonce.
+        auto nonce_bytes = ParseHex(vec["nonce"].get_str());
+        BOOST_REQUIRE_EQUAL(nonce_bytes.size(), AEADChaCha20Poly1305::NONCE_SIZE);
+        std::array<uint8_t, AEADChaCha20Poly1305::NONCE_SIZE> nonce;
+        std::memcpy(nonce.data(), nonce_bytes.data(), nonce.size());
+
+        // Build payload: pre-encoded content || raw plaintext (UTF-8 bytes).
+        auto content_bytes = ParseHex(vec["content"].get_str());
+        std::string plaintext_str = vec["plaintext"].get_str();
+        std::vector<uint8_t> payload;
+        payload.insert(payload.end(), content_bytes.begin(), content_bytes.end());
+        payload.insert(payload.end(), plaintext_str.begin(), plaintext_str.end());
+
+        // Compute secrets.
+        uint256 s = ComputeDecryptionSecret(keys);
+        auto individual_secrets = ComputeAllIndividualSecrets(s, keys);
+
+        // Encrypt.
+        auto ciphertext = EncryptChaCha20Poly1305(payload, s, nonce);
+
+        // Assemble and encode.
+        EncryptedBackup backup;
+        backup.version = static_cast<uint8_t>(vec["version"].getInt<int>());
+        backup.derivation_paths = paths;
+        backup.individual_secrets = individual_secrets;
+        backup.encryption = static_cast<EncryptionAlgorithm>(vec["encryption"].getInt<int>());
+        backup.nonce = nonce;
+        backup.ciphertext = std::move(ciphertext);
+
+        auto encoded = EncodeEncryptedBackup(backup);
+        BOOST_REQUIRE_MESSAGE(encoded, util::ErrorString(encoded).original);
+        std::string expected_hex = vec["expected"].get_str();
+        BOOST_CHECK_MESSAGE(HexStr(*encoded) == expected_hex,
+            description << ": encoded mismatch\n  got:      " << HexStr(*encoded)
+            << "\n  expected: " << expected_hex);
+
+        // Round-trip decode.
+        auto decoded = DecodeEncryptedBackup(*encoded);
+        BOOST_REQUIRE_MESSAGE(decoded, util::ErrorString(decoded).original);
+
+        // Trailing-byte tolerance.
+        if (!vec["trailing"].isNull()) {
+            auto trailing = ParseHex(vec["trailing"].get_str());
+            std::vector<uint8_t> with_trailing = *encoded;
+            with_trailing.insert(with_trailing.end(), trailing.begin(), trailing.end());
+            auto decoded2 = DecodeEncryptedBackup(with_trailing);
+            BOOST_CHECK_MESSAGE(static_cast<bool>(decoded2),
+                description << ": decoder must tolerate trailing bytes");
+        }
+
+        // Decrypt using first key and check content + plaintext match.
+        auto decrypted = DecryptBackupWithKey(*decoded, keys[0]);
+        BOOST_REQUIRE_MESSAGE(decrypted.has_value(),
+            description << ": DecryptBackupWithKey failed");
+        std::string dec_str(decrypted->first.begin(), decrypted->first.end());
+        BOOST_CHECK_EQUAL(dec_str, plaintext_str);
+    }
+}
+
+// ---------- High-level wire parsing: magic/version/encryption byte ----------
+
+BOOST_AUTO_TEST_CASE(decode_parse_magic_test)
+{
+    std::string descriptor = "wpkh([d34db33f/84h/1h/0h]tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba/0/*)";
+    auto [keys, paths] = *ExtractKeysFromDescriptor(descriptor);
+    auto content = EncryptedBackupContent::Bip(BIP_DESCRIPTORS);
+    std::vector<uint8_t> pt(descriptor.begin(), descriptor.end());
+    auto backup = CreateEncryptedBackup(keys, pt, content, paths);
+    BOOST_REQUIRE(backup);
+    auto bytes = EncodeEncryptedBackup(*backup);
+    BOOST_REQUIRE(bytes);
+    auto bad = *bytes;
+    bad[0] = 'B'; bad[1] = 'O'; bad[2] = 'B';
+    BOOST_CHECK(!DecodeEncryptedBackup(bad));
+}
+
+BOOST_AUTO_TEST_CASE(decode_parse_version_test)
+{
+    std::string descriptor = "wpkh([d34db33f/84h/1h/0h]tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba/0/*)";
+    auto [keys, paths] = *ExtractKeysFromDescriptor(descriptor);
+    auto content = EncryptedBackupContent::Bip(BIP_DESCRIPTORS);
+    std::vector<uint8_t> pt(descriptor.begin(), descriptor.end());
+    auto backup = CreateEncryptedBackup(keys, pt, content, paths);
+    BOOST_REQUIRE(backup);
+    auto bytes = EncodeEncryptedBackup(*backup);
+    BOOST_REQUIRE(bytes);
+    auto v0 = *bytes; v0[6] = 0x00;
+    BOOST_CHECK(!DecodeEncryptedBackup(v0));
+    auto v2 = *bytes; v2[6] = 0x02;
+    BOOST_CHECK(!DecodeEncryptedBackup(v2));
+}
+
+BOOST_AUTO_TEST_CASE(decode_parse_encryption_reserved_test)
+{
+    std::string descriptor = "wpkh([d34db33f/84h/1h/0h]tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba/0/*)";
+    auto [keys, paths] = *ExtractKeysFromDescriptor(descriptor);
+    auto content = EncryptedBackupContent::Bip(BIP_DESCRIPTORS);
+    std::vector<uint8_t> pt(descriptor.begin(), descriptor.end());
+    auto backup = CreateEncryptedBackup(keys, pt, content, paths);
+    BOOST_REQUIRE(backup);
+    auto bytes = EncodeEncryptedBackup(*backup);
+    BOOST_REQUIRE(bytes);
+    // Find encryption byte offset dynamically
+    auto decoded = DecodeEncryptedBackup(*bytes);
+    BOOST_REQUIRE(decoded);
+    auto paths_enc = EncodeDerivationPaths(decoded->derivation_paths);
+    BOOST_REQUIRE(paths_enc);
+    auto secrets_enc = EncodeIndividualSecrets(decoded->individual_secrets);
+    BOOST_REQUIRE(secrets_enc);
+    size_t enc_off = 6 + 1 + paths_enc->size() + secrets_enc->size();
+    BOOST_REQUIRE_EQUAL((*bytes)[enc_off], 0x01);
+    auto reserved = *bytes; reserved[enc_off] = 0x00;
+    BOOST_CHECK(!DecodeEncryptedBackup(reserved));
+    auto unknown = *bytes; unknown[enc_off] = 0x02;
+    BOOST_CHECK(!DecodeEncryptedBackup(unknown));
+}
+
+// ---------- High-level sanitizing ----------
+
+BOOST_AUTO_TEST_CASE(encrypt_sanitizing_empty_keys_test)
+{
+    auto content = EncryptedBackupContent::Bip(BIP_DESCRIPTORS);
+    std::vector<uint8_t> pt{'x'};
+    BOOST_CHECK(!CreateEncryptedBackup({}, pt, content, {}));
+}
+
+BOOST_AUTO_TEST_CASE(encrypt_sanitizing_zero_nonce_test)
+{
+    std::string descriptor = "wpkh([d34db33f/84h/1h/0h]tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba/0/*)";
+    auto [keys, paths] = *ExtractKeysFromDescriptor(descriptor);
+    auto content = EncryptedBackupContent::Bip(BIP_DESCRIPTORS);
+    std::vector<uint8_t> pt{'x'};
+    std::array<uint8_t, AEADChaCha20Poly1305::NONCE_SIZE> nonce{};
+    BOOST_CHECK(!CreateEncryptedBackupWithNonce(keys, pt, content, paths, nonce));
+}
+
+BOOST_AUTO_TEST_CASE(encrypt_sanitizing_empty_derivation_paths_test)
+{
+    std::string descriptor = "wpkh([d34db33f/84h/1h/0h]tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba/0/*)";
+    auto [keys, paths] = *ExtractKeysFromDescriptor(descriptor);
+    auto content = EncryptedBackupContent::Bip(BIP_DESCRIPTORS);
+    std::vector<uint8_t> pt{'x'};
+    BOOST_CHECK(!CreateEncryptedBackup(keys, pt, content, {}));
+}
+
+BOOST_AUTO_TEST_CASE(encrypt_sanitizing_too_many_paths_test)
+{
+    std::string descriptor = "wpkh([d34db33f/84h/1h/0h]tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba/0/*)";
+    auto [keys, _] = *ExtractKeysFromDescriptor(descriptor);
+    auto content = EncryptedBackupContent::Bip(BIP_DESCRIPTORS);
+    std::vector<uint8_t> pt{'x'};
+    std::vector<DerivationPath> paths;
+    for (size_t i = 0; i < 256; ++i) {
+        paths.push_back(DerivationPath{static_cast<uint32_t>(i), 1u, 2u, 3u});
+    }
+    std::array<uint8_t, AEADChaCha20Poly1305::NONCE_SIZE> nonce{};
+    nonce.fill(1);
+    auto r = CreateEncryptedBackupWithNonce(keys, pt, content, paths, nonce);
+    BOOST_REQUIRE(r);
+    // Size is enforced at the wire-encoding layer.
+    BOOST_CHECK(!EncodeEncryptedBackup(*r));
+}
+
+BOOST_AUTO_TEST_CASE(multi_recipient_decrypt_test)
+{
+    std::string descriptor = "wsh(multi(1,"
+        "[d34db33f/48h/1h/0h/2h]tpubDDxT9mkZzWwkKwpGT5fY6iiM9muYTPkTx6Eig8dpHR7TChuGGCWYAHVmpW1ciido5RiFWwjzYsF1GZHkEHg2nrYp3zNtx3QQRkznyLhQ77x/0/*,"
+        "[11111111/48h/1h/0h/2h]tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba/0/*"
+        "))";
+
+    auto [keys, paths] = *ExtractKeysFromDescriptor(descriptor);
+    auto content = EncryptedBackupContent::Bip(BIP_DESCRIPTORS);
+    std::vector<uint8_t> pt = {'h', 'e', 'l', 'l', 'o'};
+    auto backup = CreateEncryptedBackup(keys, pt, content, paths);
+    BOOST_REQUIRE_MESSAGE(backup, util::ErrorString(backup).original);
+    BOOST_CHECK_EQUAL(backup->individual_secrets.size(), 2u);
+
+    // Unrelated descriptor must fail to decrypt.
+    std::string other = "wpkh([22222222/84h/1h/0h]tpubDCBEcmVKbfC9KfdydyLbJ2gfNL88grZu1XcWSW9ytTM6fitvaRmVyr8Ddf7SjZ2ZfMx9RicjYAXhuh3fmLiVLPodPEqnQQURUfrBKiiVZc8/0/*)";
+    BOOST_CHECK(!DecryptBackupWithDescriptor(*backup, other));
+
+    auto r = DecryptBackupWithDescriptor(*backup, descriptor);
+    BOOST_REQUIRE(r);
+    BOOST_CHECK_EQUAL(std::string(r->first.begin(), r->first.end()), "hello");
+}
+
+// ---------- ExtractKeysFromDescriptor / CreateEncryptedBackup error cases ----------
+
+BOOST_AUTO_TEST_CASE(extract_keys_invalid_descriptor_test)
+{
+    BOOST_CHECK(!ExtractKeysFromDescriptor("not a descriptor"));
+    BOOST_CHECK(!ExtractKeysFromDescriptor(""));
+    BOOST_CHECK(!ExtractKeysFromDescriptor("wpkh()"));
+}
+
+BOOST_AUTO_TEST_CASE(extract_keys_nums_only_test)
+{
+    // tr(NUMS) is a valid descriptor whose sole key is the BIP341 NUMS point;
+    // ExtractKeysFromDescriptor must filter it out and return an error since
+    // no usable keys remain.
+    std::string nums_only = "tr(50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0)";
+    BOOST_CHECK(!ExtractKeysFromDescriptor(nums_only));
+}
+
+BOOST_AUTO_TEST_CASE(create_backup_empty_plaintext_test)
+{
+    std::string descriptor = "wpkh([d34db33f/84h/1h/0h]tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba/0/*)";
+    auto [keys, paths] = *ExtractKeysFromDescriptor(descriptor);
+    auto content = EncryptedBackupContent::Bip(BIP_DESCRIPTORS);
+    BOOST_CHECK(!CreateEncryptedBackup(keys, std::span<const uint8_t>{}, content, paths));
+}
+
+BOOST_AUTO_TEST_CASE(decode_base64_invalid_test)
+{
+    BOOST_CHECK(!DecodeEncryptedBackupBase64("!!!not-base64!!!"));
+    BOOST_CHECK(!DecodeEncryptedBackupBase64(""));
+}
+
+BOOST_AUTO_TEST_CASE(decode_base64_valid_but_bad_payload_test)
+{
+    // Valid base64 of arbitrary bytes that don't match the backup format.
+    BOOST_CHECK(!DecodeEncryptedBackupBase64("aGVsbG8gd29ybGQ=")); // "hello world"
 }
 
 BOOST_AUTO_TEST_SUITE_END()
