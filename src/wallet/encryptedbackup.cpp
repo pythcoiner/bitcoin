@@ -7,10 +7,15 @@
 #include <cstring>
 #include <set>
 
+#include <crypto/chacha20poly1305.h>
 #include <hash.h>
 #include <key_io.h>
+#include <random.h>
 #include <script/descriptor.h>
+#include <serialize.h>
+#include <streams.h>
 #include <util/bip32.h>
+#include <util/strencodings.h>
 
 namespace wallet {
 
@@ -262,6 +267,86 @@ util::Result<std::pair<std::vector<uint256>, size_t>> DecodeIndividualSecrets(st
     }
 
     return std::make_pair(std::vector<uint256>(unique_secrets.begin(), unique_secrets.end()), expected_size);
+}
+
+util::Result<std::vector<uint8_t>> EncodeContent(const EncryptedBackupContent& content)
+{
+    std::vector<uint8_t> result;
+
+    switch (content.type) {
+    case ContentType::RESERVED:
+        return util::Error{Untranslated("Reserved content type cannot be encoded")};
+
+    case ContentType::BIP_NUMBER:
+        result.push_back(static_cast<uint8_t>(ContentType::BIP_NUMBER));
+        // BIP number is big-endian uint16, no LENGTH field
+        result.push_back((content.bip_number >> 8) & 0xFF);
+        result.push_back(content.bip_number & 0xFF);
+        break;
+
+    case ContentType::VENDOR_SPECIFIC: {
+        result.push_back(static_cast<uint8_t>(ContentType::VENDOR_SPECIFIC));
+        // CompactSize encoding for length
+        DataStream ss;
+        WriteCompactSize(ss, content.vendor_data.size());
+        result.insert(result.end(), UCharCast(ss.data()), UCharCast(ss.data()) + ss.size());
+        result.insert(result.end(), content.vendor_data.begin(), content.vendor_data.end());
+        break;
+    }
+
+    default:
+        return util::Error{Untranslated("Unknown content type")};
+    }
+
+    return result;
+}
+
+util::Result<std::pair<EncryptedBackupContent, size_t>> DecodeContent(std::span<const uint8_t> data)
+{
+    if (data.empty()) {
+        return util::Error{Untranslated("Empty content data")};
+    }
+
+    const uint8_t type_byte = data[0];
+    if (type_byte == 0x00) {
+        return util::Error{Untranslated("Reserved content type 0x00")};
+    }
+    if (type_byte >= 0x80) {
+        return util::Error{Untranslated("Content type >= 0x80 stops parsing")};
+    }
+
+    EncryptedBackupContent content;
+    content.type = static_cast<ContentType>(type_byte);
+    SpanReader reader{data.subspan(1)};
+
+    if (content.type == ContentType::BIP_NUMBER) {
+        if (reader.size() < 2) {
+            return util::Error{Untranslated("Truncated BIP_NUMBER content")};
+        }
+        // BIP number is big-endian uint16, read manually
+        uint8_t hi, lo;
+        reader >> hi >> lo;
+        content.bip_number = (static_cast<uint16_t>(hi) << 8) | lo;
+    } else {
+        uint64_t length;
+        try {
+            length = ReadCompactSize(reader);
+        } catch (const std::ios_base::failure& e) {
+            return util::Error{Untranslated(strprintf("Failed to decode content length: %s", e.what()))};
+        }
+        if (length > reader.size()) {
+            return util::Error{Untranslated("Content data exceeds remaining bytes")};
+        }
+        if (content.type == ContentType::VENDOR_SPECIFIC) {
+            content.vendor_data.resize(length);
+            reader.read(MakeWritableByteSpan(content.vendor_data));
+        } else {
+            // Unknown type < 0x80: skip the payload
+            reader.ignore(length);
+        }
+    }
+
+    return std::make_pair(content, data.size() - reader.size());
 }
 
 } // namespace wallet

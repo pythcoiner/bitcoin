@@ -4,6 +4,7 @@
 
 #include <wallet/encryptedbackup.h>
 
+#include <test/data/bip_encrypted_backup_content_type.json.h>
 #include <test/data/bip_encrypted_backup_derivation_path.json.h>
 #include <test/data/bip_encrypted_backup_encryption_secret.json.h>
 #include <test/data/bip_encrypted_backup_individual_secrets.json.h>
@@ -402,6 +403,99 @@ BOOST_AUTO_TEST_CASE(individual_secrets_decode_dedup_test)
     BOOST_REQUIRE(decoded);
     BOOST_CHECK_EQUAL(decoded->first.size(), 1u);
     BOOST_CHECK_EQUAL(decoded->second, 1 + 2 * 32);
+}
+
+BOOST_AUTO_TEST_CASE(content_type_encoding_test)
+{
+    // Test content type encoding using BIP test vectors
+    UniValue vectors = read_json(json_tests::bip_encrypted_backup_content_type);
+
+    for (size_t i = 0; i < vectors.size(); ++i) {
+        const UniValue& vec = vectors[i];
+        std::string description = vec["description"].get_str();
+        bool valid = vec["valid"].get_bool();
+        std::string content_hex = vec["content"].get_str();
+
+        BOOST_TEST_MESSAGE("Testing: " << description);
+
+        auto content_bytes = ParseHex(content_hex);
+
+        // Try to decode
+        auto decoded_result = DecodeContent(content_bytes);
+
+        if (!valid) {
+            BOOST_CHECK_MESSAGE(!decoded_result,
+                description << ": expected decode failure but got success");
+        } else {
+            BOOST_REQUIRE_MESSAGE(decoded_result,
+                description << ": expected decode success but got: " <<
+                (decoded_result ? "" : util::ErrorString(decoded_result).original));
+
+            auto [content, bytes_consumed] = *decoded_result;
+
+            if (content.type == ContentType::BIP_NUMBER ||
+                content.type == ContentType::VENDOR_SPECIFIC) {
+                auto reencoded = EncodeContent(content);
+                BOOST_REQUIRE_MESSAGE(reencoded, util::ErrorString(reencoded).original);
+                BOOST_CHECK_MESSAGE(HexStr(*reencoded) == content_hex,
+                    description << ": re-encoded " << HexStr(*reencoded)
+                    << " != input " << content_hex);
+            }
+        }
+    }
+}
+
+// ---------- Content type edge cases ----------
+
+BOOST_AUTO_TEST_CASE(content_parse_empty_test)
+{
+    BOOST_CHECK(!DecodeContent(std::vector<uint8_t>{}));
+}
+
+BOOST_AUTO_TEST_CASE(content_parse_reserved_test)
+{
+    BOOST_CHECK(!DecodeContent(std::vector<uint8_t>{0x00}));
+}
+
+BOOST_AUTO_TEST_CASE(content_parse_bip_insufficient_test)
+{
+    BOOST_CHECK(!DecodeContent(std::vector<uint8_t>{0x01}));
+    BOOST_CHECK(!DecodeContent(std::vector<uint8_t>{0x01, 0x01}));
+}
+
+BOOST_AUTO_TEST_CASE(content_parse_vendor_insufficient_test)
+{
+    BOOST_CHECK(!DecodeContent(std::vector<uint8_t>{0x02, 0x03, 0xAA, 0xBB}));
+    BOOST_CHECK(!DecodeContent(std::vector<uint8_t>{0x02, 0x05, 0xAA, 0xBB, 0xCC}));
+}
+
+BOOST_AUTO_TEST_CASE(content_parse_upgrade_stop_test)
+{
+    BOOST_CHECK(!DecodeContent(std::vector<uint8_t>{0xFF}));
+    BOOST_CHECK(!DecodeContent(std::vector<uint8_t>{0xFF, 0xAA}));
+    BOOST_CHECK(!DecodeContent(std::vector<uint8_t>{0x80, 0x00}));
+}
+
+BOOST_AUTO_TEST_CASE(content_parse_unknown_skip_test)
+{
+    auto decoded = DecodeContent(std::vector<uint8_t>{0x05, 0x02, 0xAA, 0xBB});
+    BOOST_REQUIRE(decoded);
+    BOOST_CHECK_EQUAL(decoded->second, 4u);
+}
+
+BOOST_AUTO_TEST_CASE(content_serialize_known_test)
+{
+    auto enc = [](uint16_t n) {
+        EncryptedBackupContent c;
+        c.type = ContentType::BIP_NUMBER;
+        c.bip_number = n;
+        auto r = EncodeContent(c);
+        BOOST_REQUIRE(r);
+        return HexStr(*r);
+    };
+    BOOST_CHECK_EQUAL(enc(BIP_DESCRIPTORS), "01017c");
+    BOOST_CHECK_EQUAL(enc(BIP_WALLET_POLICIES), "010184");
+    BOOST_CHECK_EQUAL(enc(BIP_LABELS), "010149");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

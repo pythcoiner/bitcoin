@@ -5,15 +5,16 @@
 #ifndef BITCOIN_WALLET_ENCRYPTEDBACKUP_H
 #define BITCOIN_WALLET_ENCRYPTEDBACKUP_H
 
+#include <pubkey.h>
+#include <uint256.h>
+#include <util/result.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
-
-#include <pubkey.h>
-#include <uint256.h>
-#include <util/result.h>
 
 namespace wallet {
 
@@ -42,6 +43,31 @@ static constexpr std::string_view BIP_INDIVIDUAL_SECRET_TAG = "BIPXXX_INDIVIDUAL
  * Each element is a 32-bit child index where hardened indices have the high bit set.
  */
 using DerivationPath = std::vector<uint32_t>;
+
+/** Content type identifiers */
+enum class ContentType : uint8_t {
+    RESERVED = 0x00,
+    BIP_NUMBER = 0x01,
+    VENDOR_SPECIFIC = 0x02,
+};
+
+/** Well-known BIP numbers for content types */
+static constexpr uint16_t BIP_DESCRIPTORS = 380;
+static constexpr uint16_t BIP_WALLET_POLICIES = 388;
+static constexpr uint16_t BIP_LABELS = 329;
+
+/**
+ * Represents the content metadata in an encrypted backup.
+ */
+struct EncryptedBackupContent {
+    ContentType type{ContentType::RESERVED};
+    uint16_t bip_number{0};           // Used when type == BIP_NUMBER
+    std::vector<uint8_t> vendor_data; // Used when type == VENDOR_SPECIFIC
+
+    static EncryptedBackupContent Bip(uint16_t bip) { return {ContentType::BIP_NUMBER, bip, {}}; }
+
+    bool operator==(const EncryptedBackupContent&) const = default;
+};
 
 /**
  * Normalize a public key to 32-byte x-only format.
@@ -116,7 +142,7 @@ uint256 ComputeIndividualSecret(const uint256& key);
  * @return Vector of individual secrets (ci values)
  */
 std::vector<uint256> ComputeAllIndividualSecrets(const uint256& decryption_secret,
-                                                  const std::vector<uint256>& keys);
+                                                 const std::vector<uint256>& keys);
 
 /**
  * Parse a derivation path string (e.g., "m/44'/0'/0'") into a DerivationPath.
@@ -157,6 +183,22 @@ util::Result<std::vector<uint8_t>> EncodeIndividualSecrets(const std::vector<uin
  * @return Pair of (individual secrets, bytes consumed), or error message
  */
 util::Result<std::pair<std::vector<uint256>, size_t>> DecodeIndividualSecrets(std::span<const uint8_t> data);
+
+/**
+ * Encode content metadata according to the backup format.
+ *
+ * @param[in] content The content metadata
+ * @return Encoded bytes, or error message
+ */
+util::Result<std::vector<uint8_t>> EncodeContent(const EncryptedBackupContent& content);
+
+/**
+ * Decode content metadata from backup format.
+ *
+ * @param[in] data The encoded data
+ * @return Content metadata and bytes consumed, or error message
+ */
+util::Result<std::pair<EncryptedBackupContent, size_t>> DecodeContent(std::span<const uint8_t> data);
 
 } // namespace wallet
 
