@@ -349,4 +349,91 @@ util::Result<std::pair<EncryptedBackupContent, size_t>> DecodeContent(std::span<
     return std::make_pair(content, data.size() - reader.size());
 }
 
+namespace {
+// Build a ChaCha20 Nonce96 from a 12-byte nonce using the RFC 8439 convention
+// (state[13..16] = LE32(nonce[0..4]), LE32(nonce[4..8]), LE32(nonce[8..12])).
+// Bitcoin Core's AEADChaCha20Poly1305::NonceFromBytes uses a big-endian +
+// swapped-word layout suited to BIP324; it is not interoperable with RFC 8439,
+// which is the construction BIP encrypted backup relies on.
+AEADChaCha20Poly1305::Nonce96 Rfc8439Nonce(std::span<const uint8_t, AEADChaCha20Poly1305::NONCE_SIZE> n)
+{
+    auto le32 = [&](size_t off) -> uint32_t {
+        return uint32_t(n[off])
+            | (uint32_t(n[off + 1]) << 8)
+            | (uint32_t(n[off + 2]) << 16)
+            | (uint32_t(n[off + 3]) << 24);
+    };
+    uint32_t w0 = le32(0);
+    uint32_t w1 = le32(4);
+    uint32_t w2 = le32(8);
+    return {w0, uint64_t(w1) | (uint64_t(w2) << 32)};
+}
+} // namespace
+
+std::vector<uint8_t> EncryptChaCha20Poly1305(std::span<const uint8_t> plaintext,
+                                              const uint256& secret,
+                                              std::span<const uint8_t, AEADChaCha20Poly1305::NONCE_SIZE> nonce)
+{
+    // Convert secret to byte span
+    std::array<std::byte, SECRET_SIZE> key_bytes;
+    std::memcpy(key_bytes.data(), secret.data(), SECRET_SIZE);
+
+    // Initialize AEAD
+    AEADChaCha20Poly1305 aead{key_bytes};
+
+    auto nonce96 = Rfc8439Nonce(nonce);
+
+    // Convert plaintext to byte span
+    std::vector<std::byte> plain_bytes(plaintext.size());
+    std::memcpy(plain_bytes.data(), plaintext.data(), plaintext.size());
+
+    // Allocate output (plaintext + 16-byte tag)
+    std::vector<std::byte> cipher_bytes(plaintext.size() + AEADChaCha20Poly1305::EXPANSION);
+
+    // Encrypt with empty AAD
+    aead.Encrypt(plain_bytes, {}, nonce96, cipher_bytes);
+
+    // Convert back to uint8_t
+    std::vector<uint8_t> result(cipher_bytes.size());
+    std::memcpy(result.data(), cipher_bytes.data(), cipher_bytes.size());
+
+    return result;
+}
+
+std::optional<std::vector<uint8_t>> DecryptChaCha20Poly1305(std::span<const uint8_t> ciphertext,
+                                                             const uint256& secret,
+                                                             std::span<const uint8_t, AEADChaCha20Poly1305::NONCE_SIZE> nonce)
+{
+    if (ciphertext.size() < AEADChaCha20Poly1305::EXPANSION) {
+        return std::nullopt;
+    }
+
+    // Convert secret to byte span
+    std::array<std::byte, SECRET_SIZE> key_bytes;
+    std::memcpy(key_bytes.data(), secret.data(), SECRET_SIZE);
+
+    // Initialize AEAD
+    AEADChaCha20Poly1305 aead{key_bytes};
+
+    auto nonce96 = Rfc8439Nonce(nonce);
+
+    // Convert ciphertext to byte span
+    std::vector<std::byte> cipher_bytes(ciphertext.size());
+    std::memcpy(cipher_bytes.data(), ciphertext.data(), ciphertext.size());
+
+    // Allocate output
+    std::vector<std::byte> plain_bytes(ciphertext.size() - AEADChaCha20Poly1305::EXPANSION);
+
+    // Decrypt with empty AAD
+    if (!aead.Decrypt(cipher_bytes, {}, nonce96, plain_bytes)) {
+        return std::nullopt;
+    }
+
+    // Convert back to uint8_t
+    std::vector<uint8_t> result(plain_bytes.size());
+    std::memcpy(result.data(), plain_bytes.data(), plain_bytes.size());
+
+    return result;
+}
+
 } // namespace wallet

@@ -5,12 +5,14 @@
 #ifndef BITCOIN_WALLET_ENCRYPTEDBACKUP_H
 #define BITCOIN_WALLET_ENCRYPTEDBACKUP_H
 
+#include <crypto/chacha20poly1305.h>
 #include <pubkey.h>
 #include <uint256.h>
 #include <util/result.h>
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <utility>
@@ -31,6 +33,12 @@ const size_t SECRET_SIZE = 32;
  * IMPORTANT: This format intentionally does NOT backup private key material.
  * Restoring from an encrypted backup creates a watch-only wallet.
  */
+
+/** Encryption algorithm identifiers */
+enum class EncryptionAlgorithm : uint8_t {
+    RESERVED = 0x00,
+    CHACHA20_POLY1305 = 0x01,
+};
 
 /** Prefix for deriving the decryption secret */
 static constexpr std::string_view BIP_DECRYPTION_SECRET_TAG = "BIPXXX_DECRYPTION_SECRET";
@@ -199,6 +207,30 @@ util::Result<std::vector<uint8_t>> EncodeContent(const EncryptedBackupContent& c
  * @return Content metadata and bytes consumed, or error message
  */
 util::Result<std::pair<EncryptedBackupContent, size_t>> DecodeContent(std::span<const uint8_t> data);
+
+/**
+ * Encrypt plaintext using ChaCha20-Poly1305.
+ *
+ * @param[in] plaintext The data to encrypt
+ * @param[in] secret The 32-byte encryption secret
+ * @param[in] nonce The 12-byte nonce
+ * @return Ciphertext with authentication tag appended
+ */
+std::vector<uint8_t> EncryptChaCha20Poly1305(std::span<const uint8_t> plaintext,
+                                             const uint256& secret,
+                                             std::span<const uint8_t, AEADChaCha20Poly1305::NONCE_SIZE> nonce);
+
+/**
+ * Decrypt ciphertext using ChaCha20-Poly1305.
+ *
+ * @param[in] ciphertext The encrypted data with authentication tag
+ * @param[in] secret The 32-byte decryption secret
+ * @param[in] nonce The 12-byte nonce
+ * @return Plaintext, or nullopt if authentication fails
+ */
+std::optional<std::vector<uint8_t>> DecryptChaCha20Poly1305(std::span<const uint8_t> ciphertext,
+                                                            const uint256& secret,
+                                                            std::span<const uint8_t, AEADChaCha20Poly1305::NONCE_SIZE> nonce);
 
 } // namespace wallet
 

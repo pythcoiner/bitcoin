@@ -4,6 +4,7 @@
 
 #include <wallet/encryptedbackup.h>
 
+#include <test/data/bip_encrypted_backup_chacha20poly1305_encryption.json.h>
 #include <test/data/bip_encrypted_backup_content_type.json.h>
 #include <test/data/bip_encrypted_backup_derivation_path.json.h>
 #include <test/data/bip_encrypted_backup_encryption_secret.json.h>
@@ -496,6 +497,108 @@ BOOST_AUTO_TEST_CASE(content_serialize_known_test)
     BOOST_CHECK_EQUAL(enc(BIP_DESCRIPTORS), "01017c");
     BOOST_CHECK_EQUAL(enc(BIP_WALLET_POLICIES), "010184");
     BOOST_CHECK_EQUAL(enc(BIP_LABELS), "010149");
+}
+
+BOOST_AUTO_TEST_CASE(chacha20poly1305_roundtrip_test)
+{
+    // Test basic encryption/decryption roundtrip
+    std::vector<uint8_t> plaintext = {'H', 'e', 'l', 'l', 'o', ' ', 'W', 'o', 'r', 'l', 'd'};
+    uint256 secret;
+    GetStrongRandBytes(secret);
+
+    std::array<uint8_t, AEADChaCha20Poly1305::NONCE_SIZE> nonce;
+    GetStrongRandBytes(nonce);
+
+    // Encrypt
+    auto ciphertext = EncryptChaCha20Poly1305(plaintext, secret, nonce);
+    BOOST_CHECK_EQUAL(ciphertext.size(), plaintext.size() + AEADChaCha20Poly1305::EXPANSION);
+
+    // Decrypt with correct key
+    auto decrypted = DecryptChaCha20Poly1305(ciphertext, secret, nonce);
+    BOOST_REQUIRE(decrypted.has_value());
+    BOOST_CHECK(decrypted.value() == plaintext);
+
+    // Decrypt with wrong key should fail
+    uint256 wrong_secret;
+    GetStrongRandBytes(wrong_secret);
+    auto decrypted_wrong = DecryptChaCha20Poly1305(ciphertext, wrong_secret, nonce);
+    BOOST_CHECK(!decrypted_wrong.has_value());
+}
+
+BOOST_AUTO_TEST_CASE(chacha20poly1305_vector_test)
+{
+    UniValue vectors = read_json(json_tests::bip_encrypted_backup_chacha20poly1305_encryption);
+
+    for (size_t i = 0; i < vectors.size(); ++i) {
+        const UniValue& vec = vectors[i];
+        std::string description = vec["description"].get_str();
+        BOOST_TEST_MESSAGE("Testing: " << description);
+
+        auto nonce_bytes = ParseHex(vec["nonce"].get_str());
+        BOOST_REQUIRE_EQUAL(nonce_bytes.size(), AEADChaCha20Poly1305::NONCE_SIZE);
+        std::array<uint8_t, AEADChaCha20Poly1305::NONCE_SIZE> nonce;
+        std::memcpy(nonce.data(), nonce_bytes.data(), nonce.size());
+
+        auto secret_bytes = ParseHex(vec["secret"].get_str());
+        BOOST_REQUIRE_EQUAL(secret_bytes.size(), 32u);
+        uint256 secret;
+        std::memcpy(secret.data(), secret_bytes.data(), 32);
+
+        auto plaintext = ParseHex(vec["plaintext"].get_str());
+
+        // Vectors with null ciphertext represent inputs the spec rejects (e.g.
+        // empty plaintext). The low-level EncryptChaCha20Poly1305 doesn't
+        // enforce that rule; it lives at the CreateEncryptedBackup* layer, so
+        // drive those cases through the high-level helper and assert failure.
+        if (vec["ciphertext"].isNull()) {
+            std::string descriptor = "wpkh([d34db33f/84h/1h/0h]tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba/0/*)";
+            EncryptedBackupContent content;
+            content.type = ContentType::BIP_NUMBER;
+            content.bip_number = BIP_DESCRIPTORS;
+            auto result = CreateEncryptedBackupWithNonce(descriptor, plaintext, content, {}, nonce);
+            BOOST_CHECK_MESSAGE(!result,
+                description << ": CreateEncryptedBackupWithNonce must reject this input");
+            continue;
+        }
+
+        auto ciphertext = EncryptChaCha20Poly1305(plaintext, secret, nonce);
+        std::string expected_hex = vec["ciphertext"].get_str();
+        BOOST_CHECK_MESSAGE(HexStr(ciphertext) == expected_hex,
+            description << ": ciphertext mismatch, got " << HexStr(ciphertext));
+
+        auto decrypted = DecryptChaCha20Poly1305(ciphertext, secret, nonce);
+        BOOST_REQUIRE(decrypted.has_value());
+        BOOST_CHECK(*decrypted == plaintext);
+    }
+}
+
+// ---------- ChaCha20-Poly1305 negative tests ----------
+
+BOOST_AUTO_TEST_CASE(chacha_decrypt_wrong_nonce_test)
+{
+    std::vector<uint8_t> plaintext{'p', 'a', 'y', 'l', 'o', 'a', 'd'};
+    uint256 secret;
+    GetStrongRandBytes(secret);
+    std::array<uint8_t, AEADChaCha20Poly1305::NONCE_SIZE> nonce_a;
+    GetStrongRandBytes(nonce_a);
+    auto ct = EncryptChaCha20Poly1305(plaintext, secret, nonce_a);
+
+    std::array<uint8_t, AEADChaCha20Poly1305::NONCE_SIZE> nonce_b;
+    std::memset(nonce_b.data(), 0xF1, nonce_b.size());
+    BOOST_CHECK(!DecryptChaCha20Poly1305(ct, secret, nonce_b).has_value());
+}
+
+BOOST_AUTO_TEST_CASE(chacha_decrypt_corrupted_test)
+{
+    std::vector<uint8_t> plaintext(32, 0x42);
+    uint256 secret;
+    GetStrongRandBytes(secret);
+    std::array<uint8_t, AEADChaCha20Poly1305::NONCE_SIZE> nonce;
+    GetStrongRandBytes(nonce);
+    auto ct = EncryptChaCha20Poly1305(plaintext, secret, nonce);
+    BOOST_REQUIRE(DecryptChaCha20Poly1305(ct, secret, nonce).has_value());
+    ct.back() ^= 0x01;
+    BOOST_CHECK(!DecryptChaCha20Poly1305(ct, secret, nonce).has_value());
 }
 
 BOOST_AUTO_TEST_SUITE_END()
