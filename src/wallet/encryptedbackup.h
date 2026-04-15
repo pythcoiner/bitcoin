@@ -10,6 +10,7 @@
 #include <uint256.h>
 #include <util/result.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -33,6 +34,12 @@ const size_t SECRET_SIZE = 32;
  * IMPORTANT: This format intentionally does NOT backup private key material.
  * Restoring from an encrypted backup creates a watch-only wallet.
  */
+
+/** Magic bytes for encrypted backup format */
+static constexpr std::array<uint8_t, 6> ENCRYPTED_BACKUP_MAGIC = {'B', 'I', 'P', 'X', 'X', 'X'};
+
+/** Current format version */
+static constexpr uint8_t ENCRYPTED_BACKUP_V1 = 0x01;
 
 /** Encryption algorithm identifiers */
 enum class EncryptionAlgorithm : uint8_t {
@@ -75,6 +82,23 @@ struct EncryptedBackupContent {
     static EncryptedBackupContent Bip(uint16_t bip) { return {ContentType::BIP_NUMBER, bip, {}}; }
 
     bool operator==(const EncryptedBackupContent&) const = default;
+};
+
+/**
+ * Represents a complete encrypted backup structure.
+ *
+ * This struct represents the parsed/encoded backup format. Note that the content
+ * type metadata is stored inside the encrypted payload, not in this struct.
+ * The content is passed separately to CreateEncryptedBackup() and decoded
+ * separately after decryption.
+ */
+struct EncryptedBackup {
+    uint8_t version{ENCRYPTED_BACKUP_V1};
+    std::vector<DerivationPath> derivation_paths;
+    std::vector<uint256> individual_secrets;
+    EncryptionAlgorithm encryption{EncryptionAlgorithm::CHACHA20_POLY1305};
+    std::array<uint8_t, AEADChaCha20Poly1305::NONCE_SIZE> nonce;
+    std::vector<uint8_t> ciphertext; // Includes content prefix and authentication tag
 };
 
 /**
@@ -231,6 +255,38 @@ std::vector<uint8_t> EncryptChaCha20Poly1305(std::span<const uint8_t> plaintext,
 std::optional<std::vector<uint8_t>> DecryptChaCha20Poly1305(std::span<const uint8_t> ciphertext,
                                                             const uint256& secret,
                                                             std::span<const uint8_t, AEADChaCha20Poly1305::NONCE_SIZE> nonce);
+
+/**
+ * Encode an encrypted backup to binary format.
+ *
+ * @param[in] backup The backup structure to encode
+ * @return Encoded binary data
+ */
+util::Result<std::vector<uint8_t>> EncodeEncryptedBackup(const EncryptedBackup& backup);
+
+/**
+ * Encode an encrypted backup to base64 string.
+ *
+ * @param[in] backup The backup structure to encode
+ * @return Base64-encoded string
+ */
+util::Result<std::string> EncodeEncryptedBackupBase64(const EncryptedBackup& backup);
+
+/**
+ * Decode an encrypted backup from binary format.
+ *
+ * @param[in] data The encoded binary data
+ * @return The backup structure, or error message
+ */
+util::Result<EncryptedBackup> DecodeEncryptedBackup(std::span<const uint8_t> data);
+
+/**
+ * Decode an encrypted backup from base64 string.
+ *
+ * @param[in] base64_str The base64-encoded string
+ * @return The backup structure, or error message
+ */
+util::Result<EncryptedBackup> DecodeEncryptedBackupBase64(const std::string& base64_str);
 
 } // namespace wallet
 

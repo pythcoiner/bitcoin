@@ -436,4 +436,127 @@ std::optional<std::vector<uint8_t>> DecryptChaCha20Poly1305(std::span<const uint
     return result;
 }
 
+util::Result<std::vector<uint8_t>> EncodeEncryptedBackup(const EncryptedBackup& backup)
+{
+    std::vector<uint8_t> result;
+
+    // MAGIC (6 bytes)
+    result.insert(result.end(), ENCRYPTED_BACKUP_MAGIC.begin(), ENCRYPTED_BACKUP_MAGIC.end());
+
+    // VERSION (1 byte)
+    result.push_back(backup.version);
+
+    // DERIVATION_PATHS
+    auto paths_encoded = EncodeDerivationPaths(backup.derivation_paths);
+    if (!paths_encoded) {
+        return util::Error{util::ErrorString(paths_encoded)};
+    }
+    result.insert(result.end(), paths_encoded->begin(), paths_encoded->end());
+
+    // INDIVIDUAL_SECRETS
+    auto secrets_encoded = EncodeIndividualSecrets(backup.individual_secrets);
+    if (!secrets_encoded) {
+        return util::Error{util::ErrorString(secrets_encoded)};
+    }
+    result.insert(result.end(), secrets_encoded->begin(), secrets_encoded->end());
+
+    // ENCRYPTION (1 byte)
+    result.push_back(static_cast<uint8_t>(backup.encryption));
+
+    // ENCRYPTED_PAYLOAD: NONCE || LENGTH || CIPHERTEXT
+    result.insert(result.end(), backup.nonce.begin(), backup.nonce.end());
+
+    // CompactSize encoding for ciphertext length
+    {
+        DataStream ss;
+        WriteCompactSize(ss, backup.ciphertext.size());
+        result.insert(result.end(), UCharCast(ss.data()), UCharCast(ss.data()) + ss.size());
+    }
+
+    result.insert(result.end(), backup.ciphertext.begin(), backup.ciphertext.end());
+
+    return result;
+}
+
+util::Result<std::string> EncodeEncryptedBackupBase64(const EncryptedBackup& backup)
+{
+    auto binary = EncodeEncryptedBackup(backup);
+    if (!binary) return util::Error{util::ErrorString(binary)};
+    return EncodeBase64(*binary);
+}
+
+util::Result<EncryptedBackup> DecodeEncryptedBackup(std::span<const uint8_t> data)
+{
+    const util::Error truncated{Untranslated("Truncated encrypted backup")};
+
+    if (data.size() < 6 + 1 + 1 + 1 + 1 + 12 + 1) return truncated;
+
+    size_t pos = 0;
+    EncryptedBackup backup;
+
+    // Check MAGIC
+    if (!std::equal(ENCRYPTED_BACKUP_MAGIC.begin(), ENCRYPTED_BACKUP_MAGIC.end(), data.begin())) {
+        return util::Error{Untranslated("Invalid magic bytes")};
+    }
+    pos += ENCRYPTED_BACKUP_MAGIC.size();
+
+    // VERSION
+    backup.version = data[pos++];
+    if (backup.version != ENCRYPTED_BACKUP_V1) {
+        return util::Error{Untranslated(strprintf("Unsupported version: %d", backup.version))};
+    }
+
+    // DERIVATION_PATHS
+    auto paths_result = DecodeDerivationPaths(data.subspan(pos));
+    if (!paths_result) {
+        return util::Error{util::ErrorString(paths_result)};
+    }
+    backup.derivation_paths = std::move(paths_result->first);
+    pos += paths_result->second;
+
+    // INDIVIDUAL_SECRETS
+    if (pos >= data.size()) return truncated;
+    auto secrets_result = DecodeIndividualSecrets(data.subspan(pos));
+    if (!secrets_result) {
+        return util::Error{util::ErrorString(secrets_result)};
+    }
+    backup.individual_secrets = std::move(secrets_result->first);
+    pos += secrets_result->second;
+
+    // ENCRYPTION
+    if (pos >= data.size()) return truncated;
+    uint8_t enc_byte = data[pos++];
+    backup.encryption = static_cast<EncryptionAlgorithm>(enc_byte);
+    if (backup.encryption != EncryptionAlgorithm::CHACHA20_POLY1305) {
+        return util::Error{Untranslated("Unsupported encryption algorithm")};
+    }
+
+    // NONCE
+    if (pos + AEADChaCha20Poly1305::NONCE_SIZE > data.size()) return truncated;
+    std::memcpy(backup.nonce.data(), data.data() + pos, AEADChaCha20Poly1305::NONCE_SIZE);
+    pos += AEADChaCha20Poly1305::NONCE_SIZE;
+
+    // LENGTH (CompactSize) and CIPHERTEXT
+    try {
+        SpanReader reader{data.subspan(pos)};
+        uint64_t cipher_len = ReadCompactSize(reader);
+        if (cipher_len > reader.size()) return truncated;
+        backup.ciphertext.resize(cipher_len);
+        reader.read(MakeWritableByteSpan(backup.ciphertext));
+    } catch (const std::ios_base::failure& e) {
+        return util::Error{Untranslated(strprintf("Invalid ciphertext length: %s", e.what()))};
+    }
+
+    return backup;
+}
+
+util::Result<EncryptedBackup> DecodeEncryptedBackupBase64(const std::string& base64_str)
+{
+    auto decoded = DecodeBase64(base64_str);
+    if (!decoded) {
+        return util::Error{Untranslated("Invalid base64 encoding")};
+    }
+    return DecodeEncryptedBackup(*decoded);
+}
+
 } // namespace wallet
