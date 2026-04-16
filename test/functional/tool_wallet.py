@@ -524,6 +524,133 @@ class ToolWalletTest(BitcoinTestFramework):
 
         self.log.info("wallet-tool encryptdescriptor error cases passed!")
 
+    def test_decrypt_descriptor(self):
+        """Test decryptdescriptor command."""
+        self.log.info("Test decryptdescriptor")
+
+        # Create a test wallet to get a descriptor
+        self.start_node(0)
+        wallet_name = "decrypt_test_wallet"
+        self.nodes[0].createwallet(wallet_name)
+        wallet = self.nodes[0].get_wallet_rpc(wallet_name)
+
+        # Pick one descriptor to encrypt then decrypt
+        original_descriptors = wallet.listdescriptors()["descriptors"]
+        chosen_desc = original_descriptors[0]["desc"]
+
+        # Extract an xpub from the descriptor for decryption
+        import re
+        xpub_match = re.search(r'tpub[A-Za-z0-9]+', chosen_desc)
+        assert xpub_match, "Could not find tpub in descriptor"
+        xpub_for_decrypt = xpub_match.group(0)
+
+        self.nodes[0].unloadwallet(wallet_name)
+        self.stop_node(0)
+
+        # Encrypt
+        self.log.info("Encrypting descriptor...")
+        p = self.bitcoin_wallet_process(f"-descriptor={chosen_desc}", "encryptdescriptor")
+        backup_output, stderr = p.communicate()
+        assert_equal(p.poll(), 0)
+        backup_base64 = backup_output.strip()
+
+        # Decrypt using xpub
+        self.log.info("Decrypting backup using xpub...")
+        p = self.bitcoin_wallet_process(f"-xpub={xpub_for_decrypt}", "decryptdescriptor")
+        decrypted_output, stderr = p.communicate(input=backup_base64)
+        assert_equal(p.poll(), 0)
+
+        # Output should be the raw descriptor string
+        decrypted_desc = decrypted_output.strip()
+        assert_equal(decrypted_desc, chosen_desc)
+
+        # Test decrypt from -backupfile
+        self.log.info("Testing decrypt from -backupfile...")
+        backup_file = self.nodes[0].datadir_path / "decrypt_test.bin"
+        p = self.bitcoin_wallet_process(f"-descriptor={chosen_desc}", f"-backupfile={backup_file}", "encryptdescriptor")
+        p.communicate()
+        assert_equal(p.poll(), 0)
+
+        p = self.bitcoin_wallet_process(f"-xpub={xpub_for_decrypt}", f"-backupfile={backup_file}", "decryptdescriptor")
+        decrypted_output, stderr = p.communicate()
+        assert_equal(p.poll(), 0)
+        assert_equal(decrypted_output.strip(), chosen_desc)
+
+        backup_file.unlink()
+
+        self.log.info("decryptdescriptor test passed!")
+
+    def test_decrypt_descriptor_xpub_formats(self):
+        """Verify wallet-tool decryptdescriptor accepts each xpub form."""
+        import re
+        self.log.info("Test wallet-tool decryptdescriptor xpub format coverage")
+
+        self.start_node(0)
+        wallet_name = "xpub_fmt_src_wallet"
+        self.nodes[0].createwallet(wallet_name)
+        wallet = self.nodes[0].get_wallet_rpc(wallet_name)
+        chosen_desc = wallet.listdescriptors()["descriptors"][0]["desc"]
+        self.nodes[0].unloadwallet(wallet_name)
+        self.stop_node(0)
+
+        m = re.match(r'^[a-z]+\(\[(?P<origin>[^\]]+)\](?P<xpub>[tx]pub[A-Za-z0-9]+)(?P<deriv>/[^)]*)?\)', chosen_desc)
+        assert m is not None, f"Failed to parse chosen_desc: {chosen_desc}"
+        origin = m.group("origin")
+        xpub = m.group("xpub")
+        deriv = m.group("deriv") or "/0/*"
+
+        forms = {
+            "bare": xpub,
+            "with_origin": f"[{origin}]{xpub}",
+            "with_deriv": f"{xpub}{deriv}",
+            "with_origin_and_deriv": f"[{origin}]{xpub}{deriv}",
+            "multipath": f"{xpub}/<0;1>/*",
+        }
+
+        p = self.bitcoin_wallet_process(f"-descriptor={chosen_desc}", "encryptdescriptor")
+        backup_output, _ = p.communicate()
+        assert_equal(p.poll(), 0)
+        backup_base64 = backup_output.strip()
+
+        for label, x in forms.items():
+            p = self.bitcoin_wallet_process(f"-xpub={x}", "decryptdescriptor")
+            out, _ = p.communicate(input=backup_base64)
+            assert_equal(p.poll(), 0)
+            assert_equal(out.strip(), chosen_desc)
+            self.log.info(f"  decryptdescriptor with {label} xpub: OK")
+
+    def test_decrypt_descriptor_errors(self):
+        """Test wallet-tool decryptdescriptor error paths."""
+        self.log.info("Test wallet-tool decryptdescriptor error cases")
+        _, xpub, backup_base64 = self._setup_for_encrypted_backup_errors("dec")
+        wrong_xpub = "tpubDDxT9mkZzWwkKwpGT5fY6iiM9muYTPkTx6Eig8dpHR7TChuGGCWYAHVmpW1ciido5RiFWwjzYsF1GZHkEHg2nrYp3zNtx3QQRkznyLhQ77x"
+
+        # Missing -xpub
+        p = self.bitcoin_wallet_process("decryptdescriptor")
+        _, stderr = p.communicate(input=backup_base64)
+        assert_equal(p.poll(), 1)
+        assert "Extended public key must be provided" in stderr
+
+        # Wrong xpub
+        p = self.bitcoin_wallet_process(f"-xpub={wrong_xpub}", "decryptdescriptor")
+        _, stderr = p.communicate(input=backup_base64)
+        assert_equal(p.poll(), 1)
+        assert "Failed to decrypt" in stderr
+
+        # Empty stdin
+        p = self.bitcoin_wallet_process(f"-xpub={xpub}", "decryptdescriptor")
+        _, stderr = p.communicate(input="")
+        assert_equal(p.poll(), 1)
+        assert "No backup data provided on stdin" in stderr
+
+        # Garbage stdin (not base64)
+        p = self.bitcoin_wallet_process(f"-xpub={xpub}", "decryptdescriptor")
+        _, stderr = p.communicate(input="not-valid-base64!!!")
+        assert_equal(p.poll(), 1)
+        assert stderr.strip() != ""
+
+        self.log.info("wallet-tool decryptdescriptor error cases passed!")
+
     def run_test(self):
         self.wallet_path = self.nodes[0].wallets_path / self.default_wallet_name / self.wallet_data_filename
         self.test_invalid_tool_commands_and_args()
@@ -539,6 +666,9 @@ class ToolWalletTest(BitcoinTestFramework):
         self.test_no_create_unnamed()
         self.test_encrypt_descriptor()
         self.test_encrypt_descriptor_errors()
+        self.test_decrypt_descriptor()
+        self.test_decrypt_descriptor_xpub_formats()
+        self.test_decrypt_descriptor_errors()
 
 
 if __name__ == '__main__':

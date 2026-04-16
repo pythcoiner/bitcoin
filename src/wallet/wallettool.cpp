@@ -18,6 +18,45 @@
 namespace wallet {
 namespace WalletTool {
 
+static util::Result<EncryptedBackup> ReadBackupFromArgsOrStdin(const ArgsManager& args)
+{
+    const std::string backup_filename = args.GetArg("-backupfile", "");
+    if (!backup_filename.empty()) {
+        fs::path in_path = fs::absolute(fs::PathFromString(backup_filename));
+        std::ifstream in_file(in_path.std_path(), std::ios::binary);
+        if (in_file.fail()) {
+            return util::Error{Untranslated(strprintf("Unable to open %s for reading", fs::PathToString(in_path)))};
+        }
+        std::vector<uint8_t> binary_input((std::istreambuf_iterator<char>(in_file)),
+                                          std::istreambuf_iterator<char>());
+        if (binary_input.empty()) {
+            return util::Error{Untranslated(strprintf("Backup file %s is empty.", fs::PathToString(in_path)))};
+        }
+        return DecodeEncryptedBackup(binary_input);
+    }
+    std::string base64_input;
+    std::getline(std::cin, base64_input);
+    if (base64_input.empty()) {
+        return util::Error{Untranslated("No backup data provided on stdin.")};
+    }
+    return DecodeEncryptedBackupBase64(base64_input);
+}
+
+static util::Result<std::string> ReadAndDecryptBackup(const ArgsManager& args)
+{
+    if (!args.IsArgSet("-xpub")) {
+        return util::Error{Untranslated("Extended public key must be provided via -xpub.")};
+    }
+
+    auto backup_result = ReadBackupFromArgsOrStdin(args);
+    if (!backup_result) {
+        return util::Error{util::ErrorString(backup_result)};
+    }
+
+    return DecryptDescriptorWithXpub(*backup_result, args.GetArg("-xpub", ""));
+}
+
+
 // The standard wallet deleter function blocks on the validation interface
 // queue, which doesn't exist for the bitcoin-wallet. Define our own
 // deleter here.
@@ -100,8 +139,8 @@ bool ExecuteWalletToolFunc(const ArgsManager& args, const std::string& command)
         tfm::format(std::cerr, "The -dumpfile option can only be used with the \"dump\" and \"createfromdump\" commands.\n");
         return false;
     }
-    if (args.IsArgSet("-backupfile") && command != "encryptdescriptor") {
-        tfm::format(std::cerr, "The -backupfile option can only be used with the \"encryptdescriptor\" command.\n");
+    if (args.IsArgSet("-backupfile") && command != "encryptdescriptor" && command != "decryptdescriptor") {
+        tfm::format(std::cerr, "The -backupfile option can only be used with the \"encryptdescriptor\" and \"decryptdescriptor\" commands.\n");
         return false;
     }
     if ((command == "create" || command == "createfromdump") && !args.IsArgSet("-wallet")) {
@@ -242,6 +281,15 @@ bool ExecuteWalletToolFunc(const ArgsManager& args, const std::string& command)
             }
             tfm::format(std::cout, "%s\n", *base64_backup);
         }
+    } else if (command == "decryptdescriptor") {
+        // Decrypt an encrypted backup using a provided extended public key
+        auto descriptor = ReadAndDecryptBackup(args);
+        if (!descriptor) {
+            tfm::format(std::cerr, "%s\n", util::ErrorString(descriptor).original);
+            return false;
+        }
+
+        tfm::format(std::cout, "%s\n", *descriptor);
     } else {
         tfm::format(std::cerr, "Invalid command: %s\n", command);
         return false;
