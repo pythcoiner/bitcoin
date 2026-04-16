@@ -21,11 +21,13 @@
 #include <util/fs.h>
 #include <util/time.h>
 #include <util/translation.h>
+#include <wallet/encryptedbackup.h>
 #include <wallet/rpc/util.h>
 #include <wallet/wallet.h>
 
 #include <cstdint>
 #include <fstream>
+#include <optional>
 #include <tuple>
 #include <string>
 
@@ -639,4 +641,83 @@ RPCMethod restorewallet()
 },
     };
 }
+
+RPCMethod encryptdescriptor()
+{
+    return RPCMethod{
+        "encryptdescriptor",
+        "Encrypt a descriptor string using the BIP-XXXX encrypted backup format.\n"
+        "The encryption key is derived from the public keys in the descriptor.\n"
+        "Returns the encrypted backup as a base64-encoded string, or writes raw binary to backupfile if provided.\n",
+        {
+            {"descriptor", RPCArg::Type::STR, RPCArg::Optional::NO, "The descriptor string to encrypt (must include checksum)."},
+            {"backupfile", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "If provided, write the raw binary backup to this file instead of returning base64."},
+        },
+        {
+            RPCResult{"backupfile is not set",
+                RPCResult::Type::STR, "", "The encrypted backup as a base64 string"},
+            RPCResult{"backupfile is set",
+                RPCResult::Type::OBJ, "", "",
+                {
+                    {RPCResult::Type::STR, "filename", "The full path of the written backup file"},
+                }},
+        },
+        RPCExamples{
+            HelpExampleCli("encryptdescriptor", "\"wpkh([d34db33f/84h/0h/0h]tpub.../0/*)#checksum\"")
+            + HelpExampleCli("encryptdescriptor", "\"wpkh([d34db33f/84h/0h/0h]tpub.../0/*)#checksum\" \"backup.bin\"")
+            + HelpExampleRpc("encryptdescriptor", "\"wpkh([d34db33f/84h/0h/0h]tpub.../0/*)#checksum\"")
+        },
+        [](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
+{
+    const std::string descriptor = request.params[0].get_str();
+
+    std::vector<uint8_t> plaintext(descriptor.begin(), descriptor.end());
+
+    // ExtractKeysFromDescriptor will sanity-check the descriptor, no need for duplicate check
+    auto keys_and_paths = ExtractKeysFromDescriptor(descriptor);
+    if (!keys_and_paths) {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("Invalid descriptor: %s", util::ErrorString(keys_and_paths).original));
+    }
+    auto& [encryption_keys, derivation_paths] = *keys_and_paths;
+
+    auto content = EncryptedBackupContent::Bip(BIP_DESCRIPTORS);
+
+    auto backup = CreateEncryptedBackup(encryption_keys, plaintext, content, derivation_paths);
+    if (!backup) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Failed to create encrypted backup: %s", util::ErrorString(backup).original));
+    }
+
+    if (!request.params[1].isNull()) {
+        const std::string filename = request.params[1].get_str();
+        fs::path out_path = fs::absolute(fs::PathFromString(filename));
+        if (fs::exists(out_path)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("File %s already exists.", fs::PathToString(out_path)));
+        }
+        auto binary_backup = EncodeEncryptedBackup(*backup);
+        if (!binary_backup) {
+            throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Error encoding backup: %s", util::ErrorString(binary_backup).original));
+        }
+        std::ofstream out_file(out_path.std_path(), std::ios::binary);
+        if (out_file.fail()) {
+            throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Unable to open %s for writing", fs::PathToString(out_path)));
+        }
+        out_file.write(reinterpret_cast<const char*>(binary_backup->data()), binary_backup->size());
+        if (out_file.fail()) {
+            throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Error writing backup to %s", fs::PathToString(out_path)));
+        }
+        UniValue result(UniValue::VOBJ);
+        result.pushKV("filename", fs::PathToString(out_path));
+        return result;
+    }
+
+    auto base64_backup = EncodeEncryptedBackupBase64(*backup);
+    if (!base64_backup) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Error encoding backup: %s", util::ErrorString(base64_backup).original));
+    }
+
+    return *base64_backup;
+},
+    };
+}
+
 } // namespace wallet
