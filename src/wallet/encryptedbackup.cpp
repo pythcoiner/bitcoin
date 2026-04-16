@@ -674,4 +674,28 @@ util::Result<std::pair<std::vector<uint8_t>, EncryptedBackupContent>> DecryptBac
     return util::Error{Untranslated("No matching key found for decryption")};
 }
 
+util::Result<std::string> DecryptDescriptorWithXpub(const EncryptedBackup& backup,
+                                                    const std::string& xpub_str)
+{
+    std::string parse_error;
+    auto parsed = ParseExtPubKeyExpression(xpub_str, parse_error);
+    if (!parsed) {
+        return util::Error{Untranslated(strprintf("Invalid extended public key: %s", parse_error))};
+    }
+    CExtPubKey ext_pubkey = *parsed;
+
+    uint256 xonly_key = NormalizeToXOnly(ext_pubkey);
+
+    auto decrypted = DecryptBackupWithKey(backup, xonly_key);
+    if (!decrypted) {
+        return util::Error{Untranslated("Failed to decrypt backup: provided key does not match any participant.")};
+    }
+
+    if (decrypted->second != EncryptedBackupContent::Bip(BIP_DESCRIPTORS)) {
+        return util::Error{Untranslated("Invalid content type, BIP-0380 descriptor expected.")};
+    }
+
+    return std::string(decrypted->first.begin(), decrypted->first.end());
+}
+
 } // namespace wallet

@@ -189,6 +189,11 @@ struct Descriptor {
     virtual size_t GetKeyCount() const = 0;
 };
 
+/** Parse a key expression (optionally with origin and derivation path) and return the extended public key.
+ * Accepts formats like: xpub..., [fingerprint/path]xpub..., [fingerprint/path]xpub.../0/wildcard
+ */
+std::optional<CExtPubKey> ParseExtPubKeyExpression(const std::string& str, std::string& error);
+
 /** Parse a `descriptor` string. Included private keys are put in `out`.
  *
  * If the descriptor has a checksum, it must be valid. If `require_checksum`

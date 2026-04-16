@@ -82,9 +82,73 @@ class WalletEncryptedBackupTest(BitcoinTestFramework):
 
         self.log.info("encryptdescriptor RPC error cases passed!")
 
+    def _xpub_format_variants(self):
+        """Return a list of (label, xpub_form) pairs derived from self.chosen_desc."""
+        m = re.match(r'^[a-z]+\(\[(?P<origin>[^\]]+)\](?P<xpub>[tx]pub[A-Za-z0-9]+)(?P<deriv>/[^)]*)?\)', self.chosen_desc)
+        assert m is not None, f"Failed to parse chosen_desc: {self.chosen_desc}"
+        origin = m.group("origin")
+        xpub = m.group("xpub")
+        deriv = m.group("deriv") or "/0/*"
+        return [
+            ("bare", xpub),
+            ("with_origin", f"[{origin}]{xpub}"),
+            ("with_deriv", f"{xpub}{deriv}"),
+            ("with_origin_and_deriv", f"[{origin}]{xpub}{deriv}"),
+            ("multipath", f"{xpub}/<0;1>/*"),
+        ]
+
+    def test_decryptdescriptor(self):
+        self.log.info("Test decryptdescriptor RPC")
+
+        # Decrypt from base64
+        decrypted = self.nodes[0].decryptdescriptor(self.backup_base64, self.xpub)
+        assert_equal(decrypted, self.chosen_desc)
+
+        # Decrypt from file
+        decrypted_from_file = self.nodes[0].decryptdescriptor("", self.xpub, self.backup_file)
+        assert_equal(decrypted_from_file, self.chosen_desc)
+
+        self.log.info("decryptdescriptor RPC test passed!")
+
+    def test_decryptdescriptor_xpub_formats(self):
+        self.log.info("Test decryptdescriptor xpub format coverage")
+        node = self.nodes[0]
+        for label, x in self._xpub_format_variants():
+            result = node.decryptdescriptor(self.backup_base64, x)
+            assert_equal(result, self.chosen_desc)
+            self.log.info(f"  decryptdescriptor with {label} xpub: OK")
+
+    def test_decryptdescriptor_errors(self):
+        self.log.info("Test decryptdescriptor RPC error cases")
+        node = self.nodes[0]
+        bad_b64 = "not!valid!base64!"
+        valid_b64_bad_payload = base64.b64encode(b"hello world").decode()
+        nonexistent_file = str(node.datadir_path / "does_not_exist.bin")
+        wrong_xpub = "tpubDDxT9mkZzWwkKwpGT5fY6iiM9muYTPkTx6Eig8dpHR7TChuGGCWYAHVmpW1ciido5RiFWwjzYsF1GZHkEHg2nrYp3zNtx3QQRkznyLhQ77x"
+
+        assert_raises_rpc_error(-22, "Failed to decode backup",
+                                node.decryptdescriptor, bad_b64, self.xpub)
+        assert_raises_rpc_error(-22, "Failed to decode backup",
+                                node.decryptdescriptor, valid_b64_bad_payload, self.xpub)
+        assert_raises_rpc_error(-4, "Failed to decrypt",
+                                node.decryptdescriptor, self.backup_base64, wrong_xpub)
+        assert_raises_rpc_error(-4, "Invalid extended public key",
+                                node.decryptdescriptor, self.backup_base64, "garbage-xpub")
+        assert_raises_rpc_error(-8, "Pass either backup or backupfile, but not both",
+                                node.decryptdescriptor, self.backup_base64, self.xpub, self.backup_file)
+        assert_raises_rpc_error(-8, "Pass either backup or backupfile, but not both",
+                                node.decryptdescriptor, "", self.xpub)
+        assert_raises_rpc_error(-22, "Unable to open",
+                                node.decryptdescriptor, "", self.xpub, nonexistent_file)
+
+        self.log.info("decryptdescriptor RPC error cases passed!")
+
     def run_test(self):
         self.test_encryptdescriptor()
         self.test_encryptdescriptor_errors()
+        self.test_decryptdescriptor()
+        self.test_decryptdescriptor_xpub_formats()
+        self.test_decryptdescriptor_errors()
 
 
 if __name__ == '__main__':

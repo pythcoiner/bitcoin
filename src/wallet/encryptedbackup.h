@@ -338,6 +338,19 @@ std::optional<std::pair<std::vector<uint8_t>, EncryptedBackupContent>> DecryptBa
 util::Result<std::pair<std::vector<uint8_t>, EncryptedBackupContent>> DecryptBackupWithDescriptor(const EncryptedBackup& backup,
                                                                                                   const std::string& descriptor);
 
+/**
+ * Validate an xpub string, then decrypt an encrypted backup using that key.
+ *
+ * Combines xpub parsing, normalization to x-only, decryption, content-type
+ * validation (BIP_DESCRIPTORS), and plaintext-to-string conversion.
+ *
+ * @param[in] backup    The already-decoded EncryptedBackup structure
+ * @param[in] xpub_str  The extended public key string (xpub/tpub)
+ * @return The decrypted descriptor string, or an error
+ */
+util::Result<std::string> DecryptDescriptorWithXpub(const EncryptedBackup& backup,
+                                                    const std::string& xpub_str);
+
 } // namespace wallet
 
 #endif // BITCOIN_WALLET_ENCRYPTEDBACKUP_H

@@ -2992,3 +2992,13 @@ ExtPubKeyMap DescriptorCache::GetCachedLastHardenedExtPubKeys() const
 {
     return m_last_hardened_xpubs;
 }
+
+std::optional<CExtPubKey> ParseExtPubKeyExpression(const std::string& str, std::string& error)
+{
+    FlatSigningProvider out;
+    uint32_t key_exp_index = 0;
+    const std::span<const char> sp{str.data(), str.size()};
+    auto providers = ParsePubkey(key_exp_index, sp, ParseScriptContext::P2WPKH, out, error);
+    if (providers.empty()) return std::nullopt;
+    return providers[0]->GetRootExtPubKey();
+}

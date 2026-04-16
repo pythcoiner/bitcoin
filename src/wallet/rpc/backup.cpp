@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include "rpc/protocol.h"
 #include <chain.h>
 #include <clientversion.h>
 #include <core_io.h>
@@ -716,6 +717,83 @@ RPCMethod encryptdescriptor()
     }
 
     return *base64_backup;
+},
+    };
+}
+
+/** Read an encrypted backup from either a base64 string parameter or a binary file. */
+static util::Result<EncryptedBackup> ReadBackupFromRPCParam(const UniValue& backup_param, const UniValue& backupfile_param)
+{
+    if (!backupfile_param.isNull()) {
+        const std::string& filename = backupfile_param.get_str();
+        fs::path in_path = fs::absolute(fs::PathFromString(filename));
+        std::ifstream in_file(in_path.std_path(), std::ios::binary);
+        if (in_file.fail()) {
+            return util::Error{Untranslated(strprintf("Unable to open %s for reading", fs::PathToString(in_path)))};
+        }
+        std::vector<uint8_t> binary_input((std::istreambuf_iterator<char>(in_file)),
+                                          std::istreambuf_iterator<char>());
+        auto res = DecodeEncryptedBackup(binary_input);
+        if (!res) {
+            // try to fallback to base64 decoding
+            std::string str_input(binary_input.begin(), binary_input.end());
+            auto b64_res = DecodeEncryptedBackupBase64(str_input);
+            if (b64_res) return b64_res;
+        }
+        return res;
+    }
+    if (backup_param.isNull()) {
+        return util::Error{Untranslated("Either \"backup\" or \"backupfile\" must be provided.")};
+    }
+    return DecodeEncryptedBackupBase64(backup_param.get_str());
+}
+
+/** Validate that params follow the (backup, xpub, backupfile) convention. */
+static void ValidateBackupAndXpubParams(const UniValue& params)
+{
+    if (params[1].isNull()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "An extended public key (xpub) must be provided");
+    }
+    const bool has_backup = !params[0].isNull() && !params[0].get_str().empty();
+    const bool has_backupfile = !params[2].isNull() && !params[2].get_str().empty();
+    if (has_backup == has_backupfile) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Pass either backup or backupfile, but not both");
+    }
+}
+
+RPCMethod decryptdescriptor()
+{
+    return RPCMethod{
+        "decryptdescriptor",
+        "Decrypt a BIP-XXXX encrypted descriptor and return the descriptor string.\n"
+        "The backup can be provided as a base64 string or read from a binary file via backupfile.\n"
+        "No wallet is needed.\n",
+        {
+            {"backup", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "The base64-encoded encrypted backup (omit if using backupfile)."},
+            {"xpub", RPCArg::Type::STR, RPCArg::Optional::NO, "The extended public key (xpub/tpub) to decrypt with."},
+            {"backupfile", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "If provided, read the raw binary backup from this file instead of the backup parameter."},
+        },
+        RPCResult{RPCResult::Type::STR, "", "The decrypted descriptor string"},
+        RPCExamples{
+            HelpExampleCli("decryptdescriptor", "\"base64...\" \"tpub...\"")
+            + HelpExampleCli("decryptdescriptor", "\"\" \"tpub...\" \"backup.bin\"")
+            + HelpExampleRpc("decryptdescriptor", "\"base64...\", \"tpub...\"")
+        },
+        [](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
+{
+    ValidateBackupAndXpubParams(request.params);
+
+    auto backup_result = ReadBackupFromRPCParam(request.params[0], request.params[2]);
+    if (!backup_result) {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, strprintf("Failed to decode backup: %s", util::ErrorString(backup_result).original));
+    }
+
+    auto descriptor = DecryptDescriptorWithXpub(*backup_result, request.params[1].get_str());
+    if (!descriptor) {
+        throw JSONRPCError(RPC_WALLET_ERROR, util::ErrorString(descriptor).original);
+    }
+
+    return *descriptor;
 },
     };
 }

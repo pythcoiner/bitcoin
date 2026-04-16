@@ -948,6 +948,113 @@ BOOST_AUTO_TEST_CASE(decode_base64_valid_but_bad_payload_test)
     BOOST_CHECK(!DecodeEncryptedBackupBase64("aGVsbG8gd29ybGQ=")); // "hello world"
 }
 
+BOOST_AUTO_TEST_CASE(decrypt_with_xpub_formats_test)
+{
+    // Test DecryptDescriptorWithXpub with various xpub input formats
+    std::string descriptor = "wpkh([d34db33f/84h/1h/0h]tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba/0/*)";
+
+    // Create and encode backup
+    auto content = EncryptedBackupContent::Bip(BIP_DESCRIPTORS);
+    std::vector<uint8_t> plaintext(descriptor.begin(), descriptor.end());
+    auto [keys, paths] = *ExtractKeysFromDescriptor(descriptor);
+    auto backup_result = CreateEncryptedBackup(keys, plaintext, content, paths);
+    BOOST_REQUIRE_MESSAGE(backup_result, util::ErrorString(backup_result).original);
+
+    auto encoded = EncodeEncryptedBackup(*backup_result);
+    BOOST_REQUIRE_MESSAGE(encoded, util::ErrorString(encoded).original);
+
+    auto decoded = DecodeEncryptedBackup(*encoded);
+    BOOST_REQUIRE_MESSAGE(decoded, util::ErrorString(decoded).original);
+
+    // Bare tpub (no origin, no derivation path)
+    {
+        auto result = DecryptDescriptorWithXpub(*decoded,
+            "tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba");
+        BOOST_REQUIRE_MESSAGE(result, util::ErrorString(result).original);
+        BOOST_CHECK_EQUAL(*result, descriptor);
+    }
+
+    // With origin
+    {
+        auto result = DecryptDescriptorWithXpub(*decoded,
+            "[d34db33f/84h/1h/0h]tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba");
+        BOOST_REQUIRE_MESSAGE(result, util::ErrorString(result).original);
+        BOOST_CHECK_EQUAL(*result, descriptor);
+    }
+
+    // With origin and derivation path
+    {
+        auto result = DecryptDescriptorWithXpub(*decoded,
+            "[d34db33f/84h/1h/0h]tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba/0/*");
+        BOOST_REQUIRE_MESSAGE(result, util::ErrorString(result).original);
+        BOOST_CHECK_EQUAL(*result, descriptor);
+    }
+
+    // With derivation path only (no origin)
+    {
+        auto result = DecryptDescriptorWithXpub(*decoded,
+            "tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba/0/*");
+        BOOST_REQUIRE_MESSAGE(result, util::ErrorString(result).original);
+        BOOST_CHECK_EQUAL(*result, descriptor);
+    }
+
+    // Wrong xpub should fail
+    {
+        auto result = DecryptDescriptorWithXpub(*decoded,
+            "tpubDDxT9mkZzWwkKwpGT5fY6iiM9muYTPkTx6Eig8dpHR7TChuGGCWYAHVmpW1ciido5RiFWwjzYsF1GZHkEHg2nrYp3zNtx3QQRkznyLhQ77x");
+        BOOST_CHECK_MESSAGE(!result, "Decryption should fail with wrong xpub");
+    }
+
+    // Multipath derivation: encrypt a multipath descriptor and decrypt with the multipath xpub form
+    {
+        std::string multipath_descriptor = "wpkh([d34db33f/84h/1h/0h]tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba/<0;1>/*)";
+        auto [mp_keys, mp_paths] = *ExtractKeysFromDescriptor(multipath_descriptor);
+        std::vector<uint8_t> mp_pt(multipath_descriptor.begin(), multipath_descriptor.end());
+        auto mp_backup = CreateEncryptedBackup(mp_keys, mp_pt, content, mp_paths);
+        BOOST_REQUIRE_MESSAGE(mp_backup, util::ErrorString(mp_backup).original);
+        auto mp_encoded = EncodeEncryptedBackup(*mp_backup);
+        BOOST_REQUIRE_MESSAGE(mp_encoded, util::ErrorString(mp_encoded).original);
+        auto mp_decoded = DecodeEncryptedBackup(*mp_encoded);
+        BOOST_REQUIRE_MESSAGE(mp_decoded, util::ErrorString(mp_decoded).original);
+
+        auto result = DecryptDescriptorWithXpub(*mp_decoded,
+            "tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba/<0;1>/*");
+        BOOST_REQUIRE_MESSAGE(result, util::ErrorString(result).original);
+        BOOST_CHECK_EQUAL(*result, multipath_descriptor);
+    }
+}
+
+// ---------- DecryptDescriptorWithXpub error cases ----------
+
+BOOST_AUTO_TEST_CASE(decrypt_xpub_invalid_string_test)
+{
+    std::string descriptor = "wpkh([d34db33f/84h/1h/0h]tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba/0/*)";
+    auto [keys, paths] = *ExtractKeysFromDescriptor(descriptor);
+    std::vector<uint8_t> pt(descriptor.begin(), descriptor.end());
+    auto content = EncryptedBackupContent::Bip(BIP_DESCRIPTORS);
+    auto backup = CreateEncryptedBackup(keys, pt, content, paths);
+    BOOST_REQUIRE(backup);
+
+    BOOST_CHECK(!DecryptDescriptorWithXpub(*backup, "not-an-xpub"));
+    BOOST_CHECK(!DecryptDescriptorWithXpub(*backup, ""));
+}
+
+BOOST_AUTO_TEST_CASE(decrypt_xpub_content_mismatch_test)
+{
+    // Encrypt with a non-BIP_DESCRIPTORS content type (BIP_LABELS) and verify
+    // DecryptDescriptorWithXpub rejects it because content type isn't descriptors.
+    std::string descriptor = "wpkh([d34db33f/84h/1h/0h]tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba/0/*)";
+    auto [keys, paths] = *ExtractKeysFromDescriptor(descriptor);
+    std::vector<uint8_t> pt{'l', 'a', 'b', 'e', 'l', 's'};
+    auto content = EncryptedBackupContent::Bip(BIP_LABELS);
+    auto backup = CreateEncryptedBackup(keys, pt, content, paths);
+    BOOST_REQUIRE(backup);
+
+    auto result = DecryptDescriptorWithXpub(*backup,
+        "tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba");
+    BOOST_CHECK_MESSAGE(!result, "Should fail with content type mismatch");
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 } // namespace wallet
