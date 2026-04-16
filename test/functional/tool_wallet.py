@@ -651,6 +651,89 @@ class ToolWalletTest(BitcoinTestFramework):
 
         self.log.info("wallet-tool decryptdescriptor error cases passed!")
 
+    def test_import_encrypted_descriptor(self):
+        """Test importencrypteddescriptor command."""
+        self.log.info("Test importencrypteddescriptor")
+
+        # Create a source wallet and pick a descriptor
+        self.start_node(0)
+        src_wallet_name = "import_src_wallet"
+        self.nodes[0].createwallet(src_wallet_name)
+        src_wallet = self.nodes[0].get_wallet_rpc(src_wallet_name)
+
+        original_descriptors = src_wallet.listdescriptors()["descriptors"]
+        chosen_desc = original_descriptors[0]["desc"]
+
+        import re
+        xpub_match = re.search(r'tpub[A-Za-z0-9]+', chosen_desc)
+        assert xpub_match, "Could not find tpub in descriptor"
+        xpub_for_decrypt = xpub_match.group(0)
+
+        self.nodes[0].unloadwallet(src_wallet_name)
+        self.stop_node(0)
+
+        # Encrypt the descriptor
+        p = self.bitcoin_wallet_process(f"-descriptor={chosen_desc}", "encryptdescriptor")
+        backup_output, stderr = p.communicate()
+        assert_equal(p.poll(), 0)
+        backup_base64 = backup_output.strip()
+
+        # Create a blank wallet to import into
+        import_wallet_name = "import_dest_wallet"
+        self.bitcoin_wallet_process(f"-wallet={import_wallet_name}", "create").communicate()
+
+        # Import via importencrypteddescriptor
+        self.log.info("Importing encrypted descriptor into wallet...")
+        p = self.bitcoin_wallet_process(
+            f"-wallet={import_wallet_name}", f"-xpub={xpub_for_decrypt}",
+            "importencrypteddescriptor")
+        import_output, stderr = p.communicate(input=backup_base64)
+        if p.poll() != 0:
+            self.log.error(f"importencrypteddescriptor failed: stderr={stderr}, stdout={import_output}")
+        assert_equal(p.poll(), 0)
+        assert "imported successfully" in import_output
+
+        # Verify the descriptor was imported
+        self.start_node(0)
+        self.nodes[0].loadwallet(import_wallet_name)
+        imported_wallet = self.nodes[0].get_wallet_rpc(import_wallet_name)
+        imported_descriptors = imported_wallet.listdescriptors()["descriptors"]
+        imported_desc_strs = [d["desc"] for d in imported_descriptors]
+
+        assert chosen_desc in imported_desc_strs, \
+            f"Descriptor {chosen_desc} not found in imported wallet. Got: {imported_desc_strs}"
+
+        self.nodes[0].unloadwallet(import_wallet_name)
+        self.stop_node(0)
+
+        self.log.info("importencrypteddescriptor test passed!")
+
+    def test_import_encrypted_descriptor_errors(self):
+        """Test wallet-tool importencrypteddescriptor error paths."""
+        self.log.info("Test wallet-tool importencrypteddescriptor error cases")
+        _, xpub, backup_base64 = self._setup_for_encrypted_backup_errors("imp")
+
+        # Missing -wallet
+        p = self.bitcoin_wallet_process(f"-xpub={xpub}", "importencrypteddescriptor")
+        _, stderr = p.communicate(input=backup_base64)
+        assert_equal(p.poll(), 1)
+        assert "Wallet name must be provided" in stderr
+
+        # Missing -xpub
+        p = self.bitcoin_wallet_process("-wallet=nonexistent_wallet", "importencrypteddescriptor")
+        _, stderr = p.communicate(input=backup_base64)
+        assert_equal(p.poll(), 1)
+        assert "Extended public key must be provided" in stderr
+
+        # Nonexistent wallet
+        p = self.bitcoin_wallet_process(
+            "-wallet=nonexistent_wallet_xyz", f"-xpub={xpub}", "importencrypteddescriptor")
+        _, stderr = p.communicate(input=backup_base64)
+        assert_equal(p.poll(), 1)
+        assert stderr.strip() != ""
+
+        self.log.info("wallet-tool importencrypteddescriptor error cases passed!")
+
     def run_test(self):
         self.wallet_path = self.nodes[0].wallets_path / self.default_wallet_name / self.wallet_data_filename
         self.test_invalid_tool_commands_and_args()
@@ -669,6 +752,8 @@ class ToolWalletTest(BitcoinTestFramework):
         self.test_decrypt_descriptor()
         self.test_decrypt_descriptor_xpub_formats()
         self.test_decrypt_descriptor_errors()
+        self.test_import_encrypted_descriptor()
+        self.test_import_encrypted_descriptor_errors()
 
 
 if __name__ == '__main__':

@@ -56,7 +56,6 @@ static util::Result<std::string> ReadAndDecryptBackup(const ArgsManager& args)
     return DecryptDescriptorWithXpub(*backup_result, args.GetArg("-xpub", ""));
 }
 
-
 // The standard wallet deleter function blocks on the validation interface
 // queue, which doesn't exist for the bitcoin-wallet. Define our own
 // deleter here.
@@ -139,8 +138,8 @@ bool ExecuteWalletToolFunc(const ArgsManager& args, const std::string& command)
         tfm::format(std::cerr, "The -dumpfile option can only be used with the \"dump\" and \"createfromdump\" commands.\n");
         return false;
     }
-    if (args.IsArgSet("-backupfile") && command != "encryptdescriptor" && command != "decryptdescriptor") {
-        tfm::format(std::cerr, "The -backupfile option can only be used with the \"encryptdescriptor\" and \"decryptdescriptor\" commands.\n");
+    if (args.IsArgSet("-backupfile") && command != "encryptdescriptor" && command != "decryptdescriptor" && command != "importencrypteddescriptor") {
+        tfm::format(std::cerr, "The -backupfile option can only be used with the \"encryptdescriptor\", \"decryptdescriptor\" and \"importencrypteddescriptor\" commands.\n");
         return false;
     }
     if ((command == "create" || command == "createfromdump") && !args.IsArgSet("-wallet")) {
@@ -290,6 +289,62 @@ bool ExecuteWalletToolFunc(const ArgsManager& args, const std::string& command)
         }
 
         tfm::format(std::cout, "%s\n", *descriptor);
+    } else if (command == "importencrypteddescriptor") {
+        // Decrypt an encrypted backup and import the descriptor into a wallet
+        if (!args.IsArgSet("-wallet")) {
+            tfm::format(std::cerr, "Wallet name must be provided for importencrypteddescriptor.\n");
+            return false;
+        }
+
+        auto descriptor_result = ReadAndDecryptBackup(args);
+        if (!descriptor_result) {
+            tfm::format(std::cerr, "%s\n", util::ErrorString(descriptor_result).original);
+            return false;
+        }
+
+        // Parse the decrypted descriptor string
+        std::string descriptor(*descriptor_result);
+        FlatSigningProvider keys;
+        std::string parse_error;
+        auto parsed_descs = Parse(descriptor, keys, parse_error, /*require_checksum=*/true);
+        if (parsed_descs.empty()) {
+            tfm::format(std::cerr, "Invalid descriptor in backup: %s\n", parse_error);
+            return false;
+        }
+
+        // Load the target wallet
+        DatabaseOptions options;
+        ReadDatabaseArgs(args, options);
+        options.require_existing = true;
+        const std::shared_ptr<CWallet> wallet_instance = MakeWallet(name, path, options);
+        if (!wallet_instance) {
+            tfm::format(std::cerr, "Unable to load wallet \"%s\" for importencrypteddescriptor.\n", name);
+            return false;
+        }
+
+        LOCK(wallet_instance->cs_wallet);
+
+        // Import each sub-descriptor (multipath descriptors may produce multiple)
+        for (size_t j = 0; j < parsed_descs.size(); ++j) {
+            auto& parsed_desc = parsed_descs[j];
+            const bool is_range = parsed_desc->IsRange();
+            int64_t range_start = 0;
+            int64_t range_end = is_range ? wallet_instance->m_keypool_size : 0;
+
+            WalletDescriptor w_desc(std::move(parsed_desc), /*creation_time=*/1, range_start, range_end, /*next_index=*/0);
+
+            bool internal = (parsed_descs.size() == 2 && j == 1);
+            auto spk_manager_res = wallet_instance->AddWalletDescriptor(w_desc, keys, /*label=*/"", internal);
+            if (!spk_manager_res) {
+                tfm::format(std::cerr, "Failed to import descriptor: %s\n",
+                            util::ErrorString(spk_manager_res).original);
+                wallet_instance->Close();
+                return false;
+            }
+        }
+
+        tfm::format(std::cout, "Descriptor imported successfully into wallet \"%s\".\n", name);
+        wallet_instance->Close();
     } else {
         tfm::format(std::cerr, "Invalid command: %s\n", command);
         return false;
