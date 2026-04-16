@@ -40,11 +40,14 @@ static void SetupWalletToolArgs(ArgsManager& argsman)
     argsman.AddArg("-dumpfile=<file name>", "When used with 'dump', writes out the records to this file. When used with 'createfromdump', loads the records into a new wallet.", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::OPTIONS);
     argsman.AddArg("-debug=<category>", "Output debugging information (default: 0).", ArgsManager::ALLOW_ANY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-printtoconsole", "Send trace/debug info to console (default: 1 when no -debug is true, 0 otherwise).", ArgsManager::ALLOW_ANY, OptionsCategory::DEBUG_TEST);
+    argsman.AddArg("-descriptor=<descriptor>", "Descriptor string to encrypt (with checksum)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::OPTIONS);
+    argsman.AddArg("-backupfile=<file name>", "When used with 'encryptdescriptor', writes the raw binary backup to this file (no base64). When used with 'decryptdescriptor' or 'inspectencrypteddescriptor', reads the raw binary backup from this file.", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::OPTIONS);
 
     argsman.AddCommand("info", "Get wallet info");
     argsman.AddCommand("create", "Create a new descriptor wallet file");
     argsman.AddCommand("dump", "Print out all of the wallet key-value records");
     argsman.AddCommand("createfromdump", "Create new wallet file from dumped records");
+    argsman.AddCommand("encryptdescriptor", "Encrypt a descriptor string (outputs base64 to stdout, or raw binary to -backupfile)");
 }
 
 static std::optional<int> WalletAppInit(ArgsManager& args, int argc, char* argv[])

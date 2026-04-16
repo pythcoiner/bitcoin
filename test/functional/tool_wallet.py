@@ -431,6 +431,99 @@ class ToolWalletTest(BitcoinTestFramework):
         self.assert_raises_tool_error("Wallet name cannot be empty", "-wallet=", "-dumpfile=wallet.dump", "createfromdump")
         assert not (self.nodes[0].wallets_path / "wallet.dat").exists()
 
+    def test_encrypt_descriptor(self):
+        """Test encryptdescriptor command."""
+        self.log.info("Test encryptdescriptor")
+
+        # Create a test wallet to get a descriptor from listdescriptors
+        self.start_node(0)
+        wallet_name = "backup_test_wallet"
+        self.nodes[0].createwallet(wallet_name)
+        wallet = self.nodes[0].get_wallet_rpc(wallet_name)
+
+        # Pick one descriptor to encrypt
+        original_descriptors = wallet.listdescriptors()["descriptors"]
+        chosen_desc = original_descriptors[0]["desc"]
+
+        self.nodes[0].unloadwallet(wallet_name)
+        self.stop_node(0)
+
+        # Encrypt the chosen descriptor
+        self.log.info("Encrypting descriptor...")
+        p = self.bitcoin_wallet_process(f"-descriptor={chosen_desc}", "encryptdescriptor")
+        backup_output, stderr = p.communicate()
+        assert_equal(p.poll(), 0)
+        assert_equal(stderr, "")
+        backup_base64 = backup_output.strip()
+
+        # Verify it's base64 and starts with expected magic when decoded
+        import base64
+        backup_bytes = base64.b64decode(backup_base64)
+        assert backup_bytes[:3] == b"BIP", f"Expected magic 'BIP', got: {backup_bytes[:3]}"
+
+        # Test raw binary backup file roundtrip via -backupfile
+        self.log.info("Testing raw binary backup via -backupfile...")
+        backup_file = self.nodes[0].datadir_path / "backup.bin"
+        assert not backup_file.exists()
+
+        p = self.bitcoin_wallet_process(f"-descriptor={chosen_desc}", f"-backupfile={backup_file}", "encryptdescriptor")
+        _, stderr = p.communicate()
+        assert_equal(p.poll(), 0)
+        assert_equal(stderr, "")
+        assert backup_file.exists()
+
+        # Verify file is raw binary (starts with magic, not base64)
+        raw_bytes = backup_file.read_bytes()
+        assert len(raw_bytes) > 0
+        assert_equal(raw_bytes[:3], b"BIP")
+
+        # Refuse to overwrite existing file
+        self.assert_raises_tool_error(
+            "already exists",
+            f"-descriptor={chosen_desc}", f"-backupfile={backup_file}", "encryptdescriptor",
+        )
+
+        backup_file.unlink()
+
+        self.log.info("encryptdescriptor test passed!")
+
+    def _setup_for_encrypted_backup_errors(self, suffix):
+        """Get a real descriptor + xpub from a fresh wallet, plus a real backup."""
+        import re
+        self.start_node(0)
+        wallet_name = f"err_src_wallet_{suffix}"
+        self.nodes[0].createwallet(wallet_name)
+        wallet = self.nodes[0].get_wallet_rpc(wallet_name)
+        chosen_desc = wallet.listdescriptors()["descriptors"][0]["desc"]
+        xpub = re.search(r'tpub[A-Za-z0-9]+', chosen_desc).group(0)
+        self.nodes[0].unloadwallet(wallet_name)
+        self.stop_node(0)
+        p = self.bitcoin_wallet_process(f"-descriptor={chosen_desc}", "encryptdescriptor")
+        backup_output, _ = p.communicate()
+        assert_equal(p.poll(), 0)
+        return chosen_desc, xpub, backup_output.strip()
+
+    def test_encrypt_descriptor_errors(self):
+        """Test wallet-tool encryptdescriptor error paths."""
+        self.log.info("Test wallet-tool encryptdescriptor error cases")
+        chosen_desc, _, _ = self._setup_for_encrypted_backup_errors("enc")
+
+        # Missing -descriptor
+        self.assert_raises_tool_error("Descriptor string must be provided", "encryptdescriptor")
+        # Invalid/unparseable descriptor
+        self.assert_raises_tool_error("Invalid descriptor",
+                                     "-descriptor=this is not a descriptor", "encryptdescriptor")
+        # File already exists
+        backup_file = self.nodes[0].datadir_path / "err_existing.bin"
+        backup_file.write_bytes(b"placeholder")
+        self.assert_raises_tool_error(
+            "already exists",
+            f"-descriptor={chosen_desc}", f"-backupfile={backup_file}", "encryptdescriptor",
+        )
+        backup_file.unlink()
+
+        self.log.info("wallet-tool encryptdescriptor error cases passed!")
+
     def run_test(self):
         self.wallet_path = self.nodes[0].wallets_path / self.default_wallet_name / self.wallet_data_filename
         self.test_invalid_tool_commands_and_args()
@@ -444,6 +537,8 @@ class ToolWalletTest(BitcoinTestFramework):
         self.test_dump_very_large_records()
         self.test_no_create_legacy()
         self.test_no_create_unnamed()
+        self.test_encrypt_descriptor()
+        self.test_encrypt_descriptor_errors()
 
 
 if __name__ == '__main__':

@@ -5,10 +5,13 @@
 #include <wallet/wallettool.h>
 
 #include <common/args.h>
+#include <fstream>
+#include <script/descriptor.h>
 #include <util/check.h>
 #include <util/fs.h>
 #include <util/translation.h>
 #include <wallet/dump.h>
+#include <wallet/encryptedbackup.h>
 #include <wallet/wallet.h>
 #include <wallet/walletutil.h>
 
@@ -97,6 +100,10 @@ bool ExecuteWalletToolFunc(const ArgsManager& args, const std::string& command)
         tfm::format(std::cerr, "The -dumpfile option can only be used with the \"dump\" and \"createfromdump\" commands.\n");
         return false;
     }
+    if (args.IsArgSet("-backupfile") && command != "encryptdescriptor") {
+        tfm::format(std::cerr, "The -backupfile option can only be used with the \"encryptdescriptor\" command.\n");
+        return false;
+    }
     if ((command == "create" || command == "createfromdump") && !args.IsArgSet("-wallet")) {
         tfm::format(std::cerr, "Wallet name must be provided when creating a new wallet.\n");
         return false;
@@ -163,6 +170,78 @@ bool ExecuteWalletToolFunc(const ArgsManager& args, const std::string& command)
             tfm::format(std::cerr, "%s\n", error.original);
         }
         return ret;
+    } else if (command == "encryptdescriptor") {
+        // Encrypt a descriptor string using BIP-XXXX encrypted backup format
+        if (!args.IsArgSet("-descriptor")) {
+            tfm::format(std::cerr, "Descriptor string must be provided via -descriptor for encryptdescriptor.\n");
+            return false;
+        }
+        const std::string descriptor = args.GetArg("-descriptor", "");
+
+        // Validate the descriptor parses and has a checksum
+        FlatSigningProvider keys;
+        std::string parse_error;
+        auto parsed = Parse(descriptor, keys, parse_error, /*require_checksum=*/true);
+        if (parsed.empty()) {
+            tfm::format(std::cerr, "Invalid descriptor: %s\n", parse_error);
+            return false;
+        }
+
+        // Plaintext is the raw descriptor string
+        std::vector<uint8_t> plaintext(descriptor.begin(), descriptor.end());
+
+        auto extract_result = ExtractKeysFromDescriptor(descriptor);
+        if (!extract_result) {
+            tfm::format(std::cerr, "Failed to extract keys: %s\n",
+                        util::ErrorString(extract_result).original);
+            return false;
+        }
+        auto& [encryption_keys, derivation_paths] = *extract_result;
+
+        // Create backup content metadata
+        EncryptedBackupContent content;
+        content.type = ContentType::BIP_NUMBER;
+        content.bip_number = BIP_DESCRIPTORS;
+
+        // Create the encrypted backup
+        auto backup_result = CreateEncryptedBackup(encryption_keys, plaintext, content, derivation_paths);
+        if (!backup_result) {
+            tfm::format(std::cerr, "Failed to create encrypted backup: %s\n",
+                        util::ErrorString(backup_result).original);
+            return false;
+        }
+
+        // If -backupfile is set, write raw binary backup to that file. Otherwise output base64 to stdout.
+        const std::string backup_filename = args.GetArg("-backupfile", "");
+        if (!backup_filename.empty()) {
+            fs::path out_path = fs::absolute(fs::PathFromString(backup_filename));
+            if (fs::exists(out_path)) {
+                tfm::format(std::cerr, "File %s already exists. If you are sure this is what you want, move it out of the way first.\n", fs::PathToString(out_path));
+                return false;
+            }
+            auto binary_backup = EncodeEncryptedBackup(*backup_result);
+            if (!binary_backup) {
+                tfm::format(std::cerr, "Error encoding backup: %s\n", util::ErrorString(binary_backup).original);
+                return false;
+            }
+            std::ofstream out_file(out_path.std_path(), std::ios::binary);
+            if (out_file.fail()) {
+                tfm::format(std::cerr, "Unable to open %s for writing\n", fs::PathToString(out_path));
+                return false;
+            }
+            out_file.write(reinterpret_cast<const char*>(binary_backup->data()), binary_backup->size());
+            if (out_file.fail()) {
+                tfm::format(std::cerr, "Error writing backup to %s\n", fs::PathToString(out_path));
+                return false;
+            }
+        } else {
+            auto base64_backup = EncodeEncryptedBackupBase64(*backup_result);
+            if (!base64_backup) {
+                tfm::format(std::cerr, "Error encoding backup: %s\n", util::ErrorString(base64_backup).original);
+                return false;
+            }
+            tfm::format(std::cout, "%s\n", *base64_backup);
+        }
     } else {
         tfm::format(std::cerr, "Invalid command: %s\n", command);
         return false;
