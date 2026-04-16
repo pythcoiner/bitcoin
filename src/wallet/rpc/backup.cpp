@@ -864,4 +864,61 @@ RPCMethod importencrypteddescriptor()
     };
 }
 
+RPCMethod inspectencryptedbackup()
+{
+    return RPCMethod{
+        "inspectencryptedbackup",
+        "Show metadata from a BIP-XXXX encrypted descriptor.\n"
+        "The backup can be provided as a base64 string or read from a binary file via backupfile.\n"
+        "No wallet is needed.\n",
+        {
+            {"backup", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "The base64-encoded encrypted backup (omit if using backupfile)."},
+            {"backupfile", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "If provided, read the raw binary backup from this file instead of the backup parameter."},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "",
+        {
+            {RPCResult::Type::NUM, "version", "Backup format version"},
+            {RPCResult::Type::NUM, "keys", "Number of keys"},
+            {RPCResult::Type::STR, "encryption", "Encryption algorithm"},
+            {RPCResult::Type::ARR, "derivation_paths", "Derivation paths stored in the backup",
+            {
+                {RPCResult::Type::STR, "", "A derivation path"},
+            }},
+        }},
+        RPCExamples{
+            HelpExampleCli("inspectencryptedbackup", "\"base64...\"")
+            + HelpExampleCli("inspectencryptedbackup", "\"\" \"backup.bin\"")
+            + HelpExampleRpc("inspectencryptedbackup", "\"base64...\"")
+        },
+        [](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
+{
+    auto backup_result = ReadBackupFromRPCParam(request.params[0], request.params[1]);
+    if (!backup_result) {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, strprintf("Failed to decode backup: %s", util::ErrorString(backup_result).original));
+    }
+
+    const EncryptedBackup& backup = *backup_result;
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("version", backup.version);
+    result.pushKV("keys", static_cast<int>(backup.individual_secrets.size()));
+
+    std::string enc_str;
+    switch (backup.encryption) {
+        case EncryptionAlgorithm::CHACHA20_POLY1305: enc_str = "ChaCha20-Poly1305"; break;
+        default: enc_str = "unknown"; break;
+    }
+    result.pushKV("encryption", enc_str);
+
+    UniValue paths_arr(UniValue::VARR);
+    for (const auto& path : backup.derivation_paths) {
+        paths_arr.push_back(WriteHDKeypath(path, /*apostrophe=*/true));
+    }
+    result.pushKV("derivation_paths", paths_arr);
+
+    return result;
+},
+    };
+}
+
 } // namespace wallet

@@ -863,6 +863,7 @@ RPCMethod restorewallet();
 RPCMethod encryptdescriptor();
 RPCMethod decryptdescriptor();
 RPCMethod importencrypteddescriptor();
+RPCMethod inspectencryptedbackup();
 
 // coins
 RPCMethod getreceivedbyaddress();
@@ -933,6 +934,7 @@ std::span<const CRPCCommand> GetWalletRPCCommands()
         {"wallet", &importdescriptors},
         {"wallet", &importencrypteddescriptor},
         {"wallet", &importprunedfunds},
+        {"wallet", &inspectencryptedbackup},
         {"wallet", &keypoolrefill},
         {"wallet", &listaddressgroupings},
         {"wallet", &listdescriptors},

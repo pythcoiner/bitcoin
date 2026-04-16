@@ -2,7 +2,7 @@
 # Copyright (c) 2024-present The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""Test the encryptdescriptor, decryptdescriptor, importencrypteddescriptor, and inspectencrypteddescriptor RPCs."""
+"""Test the encryptdescriptor, decryptdescriptor, importencrypteddescriptor, and inspectencryptedbackup RPCs."""
 
 import base64
 import os
@@ -204,6 +204,36 @@ class WalletEncryptedBackupTest(BitcoinTestFramework):
 
         self.log.info("importencrypteddescriptor RPC error cases passed!")
 
+    def test_inspectencryptedbackup(self):
+        self.log.info("Test inspectencryptedbackup RPC")
+
+        # Inspect from base64
+        metadata = self.nodes[0].inspectencryptedbackup(self.backup_base64)
+        assert_equal(metadata["version"], 1)
+        assert_equal(metadata["encryption"], "ChaCha20-Poly1305")
+        assert metadata["keys"] >= 1
+
+        # Inspect from file
+        metadata_from_file = self.nodes[0].inspectencryptedbackup("", self.backup_file)
+        assert_equal(metadata_from_file["version"], 1)
+        assert_equal(metadata_from_file["encryption"], "ChaCha20-Poly1305")
+        assert metadata_from_file["keys"] >= 1
+
+        self.log.info("inspectencryptedbackup RPC test passed!")
+
+    def test_inspectencryptedbackup_errors(self):
+        self.log.info("Test inspectencryptedbackup RPC error cases")
+        node = self.nodes[0]
+        bad_b64 = "not!valid!base64!"
+        nonexistent_file = str(node.datadir_path / "does_not_exist.bin")
+
+        assert_raises_rpc_error(-22, "Failed to decode backup",
+                                node.inspectencryptedbackup, bad_b64)
+        assert_raises_rpc_error(-22, "Unable to open",
+                                node.inspectencryptedbackup, "", nonexistent_file)
+
+        self.log.info("inspectencryptedbackup RPC error cases passed!")
+
     def run_test(self):
         self.test_encryptdescriptor()
         self.test_encryptdescriptor_errors()
@@ -213,6 +243,8 @@ class WalletEncryptedBackupTest(BitcoinTestFramework):
         self.test_importencrypteddescriptor()
         self.test_importencrypteddescriptor_xpub_formats()
         self.test_importencrypteddescriptor_errors()
+        self.test_inspectencryptedbackup()
+        self.test_inspectencryptedbackup_errors()
 
 
 if __name__ == '__main__':
