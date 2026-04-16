@@ -798,4 +798,70 @@ RPCMethod decryptdescriptor()
     };
 }
 
+RPCMethod importencrypteddescriptor()
+{
+    return RPCMethod{
+        "importencrypteddescriptor",
+        "Decrypt a BIP-XXXX encrypted backup and import the descriptor into the wallet.\n"
+        "The backup can be provided as a base64 string or read from a binary file via backupfile.\n",
+        {
+            {"backup", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "The base64-encoded encrypted backup (omit if using backupfile)."},
+            {"xpub", RPCArg::Type::STR, RPCArg::Optional::NO, "The extended public key (xpub/tpub) to decrypt with."},
+            {"backupfile", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "If provided, read the raw binary backup from this file instead of the backup parameter."},
+        },
+        RPCResult{RPCResult::Type::STR, "", "The imported descriptor string"},
+        RPCExamples{
+            HelpExampleCli("importencrypteddescriptor", "\"base64...\" \"tpub...\"")
+            + HelpExampleCli("importencrypteddescriptor", "\"\" \"tpub...\" \"backup.bin\"")
+            + HelpExampleRpc("importencrypteddescriptor", "\"base64...\", \"tpub...\"")
+        },
+        [](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
+{
+    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    if (!pwallet) return UniValue::VNULL;
+
+    ValidateBackupAndXpubParams(request.params);
+
+    // Decode and decrypt
+    auto backup_result = ReadBackupFromRPCParam(request.params[0], request.params[2]);
+    if (!backup_result) {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, strprintf("Failed to decode backup: %s", util::ErrorString(backup_result).original));
+    }
+
+    auto descriptor_result = DecryptDescriptorWithXpub(*backup_result, request.params[1].get_str());
+    if (!descriptor_result) {
+        throw JSONRPCError(RPC_WALLET_ERROR, util::ErrorString(descriptor_result).original);
+    }
+
+    // Parse descriptor
+    std::string descriptor(*descriptor_result);
+    FlatSigningProvider keys;
+    std::string error;
+    auto parsed_descs = Parse(descriptor, keys, error, /*require_checksum=*/true);
+    if (parsed_descs.empty()) {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("Invalid descriptor in backup: %s", error));
+    }
+
+    LOCK(pwallet->cs_wallet);
+
+    for (size_t j = 0; j < parsed_descs.size(); ++j) {
+        auto& parsed_desc = parsed_descs[j];
+        const bool is_range = parsed_desc->IsRange();
+        int64_t range_start = 0;
+        int64_t range_end = is_range ? pwallet->m_keypool_size : 0;
+
+        WalletDescriptor w_desc(std::move(parsed_desc), /*creation_time=*/1, range_start, range_end, /*next_index=*/0);
+
+        bool internal = (parsed_descs.size() == 2 && j == 1);
+        auto spk_manager_res = pwallet->AddWalletDescriptor(w_desc, keys, /*label=*/"", internal);
+        if (!spk_manager_res) {
+            throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Failed to import descriptor: %s", util::ErrorString(spk_manager_res).original));
+        }
+    }
+
+    return UniValue(descriptor);
+},
+    };
+}
+
 } // namespace wallet

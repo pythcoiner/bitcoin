@@ -143,12 +143,76 @@ class WalletEncryptedBackupTest(BitcoinTestFramework):
 
         self.log.info("decryptdescriptor RPC error cases passed!")
 
+    def test_importencrypteddescriptor(self):
+        self.log.info("Test importencrypteddescriptor RPC")
+
+        # Create a blank wallet to import into
+        import_wallet_name = "import_test_wallet"
+        self.nodes[0].createwallet(import_wallet_name, disable_private_keys=True, blank=True)
+        import_wallet = self.nodes[0].get_wallet_rpc(import_wallet_name)
+
+        # Import from base64
+        import_wallet.importencrypteddescriptor(self.backup_base64, self.xpub)
+
+        imported_desc_strs = [d["desc"] for d in import_wallet.listdescriptors()["descriptors"]]
+        assert self.chosen_desc in imported_desc_strs, \
+            f"Descriptor not found in imported wallet. Got: {imported_desc_strs}"
+
+        self.nodes[0].unloadwallet(import_wallet_name)
+
+        # Import from file into another blank wallet
+        import_wallet_name2 = "import_test_wallet_file"
+        self.nodes[0].createwallet(import_wallet_name2, disable_private_keys=True, blank=True)
+        import_wallet2 = self.nodes[0].get_wallet_rpc(import_wallet_name2)
+
+        import_wallet2.importencrypteddescriptor("", self.xpub, self.backup_file)
+
+        imported_desc_strs2 = [d["desc"] for d in import_wallet2.listdescriptors()["descriptors"]]
+        assert self.chosen_desc in imported_desc_strs2
+
+        self.nodes[0].unloadwallet(import_wallet_name2)
+
+        self.log.info("importencrypteddescriptor RPC test passed!")
+
+    def test_importencrypteddescriptor_xpub_formats(self):
+        self.log.info("Test importencrypteddescriptor xpub format coverage")
+        node = self.nodes[0]
+        for i, (label, x) in enumerate(self._xpub_format_variants()):
+            wname = f"xpub_fmt_wallet_{i}"
+            node.createwallet(wname, disable_private_keys=True, blank=True)
+            w = node.get_wallet_rpc(wname)
+            w.importencrypteddescriptor(self.backup_base64, x)
+            descs = [d["desc"] for d in w.listdescriptors()["descriptors"]]
+            assert self.chosen_desc in descs, \
+                f"importencrypteddescriptor with {label} xpub did not import. Got: {descs}"
+            node.unloadwallet(wname)
+            self.log.info(f"  importencrypteddescriptor with {label} xpub: OK")
+
+    def test_importencrypteddescriptor_errors(self):
+        self.log.info("Test importencrypteddescriptor RPC error cases")
+        node = self.nodes[0]
+        bad_b64 = "not!valid!base64!"
+        wrong_xpub = "tpubDDxT9mkZzWwkKwpGT5fY6iiM9muYTPkTx6Eig8dpHR7TChuGGCWYAHVmpW1ciido5RiFWwjzYsF1GZHkEHg2nrYp3zNtx3QQRkznyLhQ77x"
+
+        node.createwallet("import_error_test_wallet", disable_private_keys=True, blank=True)
+        err_wallet = node.get_wallet_rpc("import_error_test_wallet")
+        assert_raises_rpc_error(-4, "Failed to decrypt",
+                                err_wallet.importencrypteddescriptor, self.backup_base64, wrong_xpub)
+        assert_raises_rpc_error(-22, "Failed to decode backup",
+                                err_wallet.importencrypteddescriptor, bad_b64, self.xpub)
+        node.unloadwallet("import_error_test_wallet")
+
+        self.log.info("importencrypteddescriptor RPC error cases passed!")
+
     def run_test(self):
         self.test_encryptdescriptor()
         self.test_encryptdescriptor_errors()
         self.test_decryptdescriptor()
         self.test_decryptdescriptor_xpub_formats()
         self.test_decryptdescriptor_errors()
+        self.test_importencrypteddescriptor()
+        self.test_importencrypteddescriptor_xpub_formats()
+        self.test_importencrypteddescriptor_errors()
 
 
 if __name__ == '__main__':
