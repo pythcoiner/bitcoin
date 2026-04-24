@@ -5,15 +5,58 @@
 #include <wallet/wallettool.h>
 
 #include <common/args.h>
+#include <fstream>
+#include <script/descriptor.h>
+#include <univalue.h>
+#include <util/bip32.h>
 #include <util/check.h>
 #include <util/fs.h>
 #include <util/translation.h>
 #include <wallet/dump.h>
+#include <wallet/encryptedbackup.h>
 #include <wallet/wallet.h>
 #include <wallet/walletutil.h>
 
 namespace wallet {
 namespace WalletTool {
+
+static util::Result<EncryptedBackup> ReadBackupFromArgsOrStdin(const ArgsManager& args)
+{
+    const std::string backup_filename = args.GetArg("-backupfile", "");
+    if (!backup_filename.empty()) {
+        fs::path in_path = fs::absolute(fs::PathFromString(backup_filename));
+        std::ifstream in_file(in_path.std_path(), std::ios::binary);
+        if (in_file.fail()) {
+            return util::Error{Untranslated(strprintf("Unable to open %s for reading", fs::PathToString(in_path)))};
+        }
+        std::vector<uint8_t> binary_input((std::istreambuf_iterator<char>(in_file)),
+                                          std::istreambuf_iterator<char>());
+        if (binary_input.empty()) {
+            return util::Error{Untranslated(strprintf("Backup file %s is empty.", fs::PathToString(in_path)))};
+        }
+        return DecodeEncryptedBackup(binary_input);
+    }
+    std::string base64_input;
+    std::getline(std::cin, base64_input);
+    if (base64_input.empty()) {
+        return util::Error{Untranslated("No backup data provided on stdin.")};
+    }
+    return DecodeEncryptedBackupBase64(base64_input);
+}
+
+static util::Result<std::string> ReadAndDecryptBackup(const ArgsManager& args)
+{
+    if (!args.IsArgSet("-xpub")) {
+        return util::Error{Untranslated("Extended public key must be provided via -xpub.")};
+    }
+
+    auto backup_result = ReadBackupFromArgsOrStdin(args);
+    if (!backup_result) {
+        return util::Error{util::ErrorString(backup_result)};
+    }
+
+    return DecryptDescriptorWithXpub(*backup_result, args.GetArg("-xpub", ""));
+}
 
 // The standard wallet deleter function blocks on the validation interface
 // queue, which doesn't exist for the bitcoin-wallet. Define our own
@@ -97,6 +140,10 @@ bool ExecuteWalletToolFunc(const ArgsManager& args, const std::string& command)
         tfm::format(std::cerr, "The -dumpfile option can only be used with the \"dump\" and \"createfromdump\" commands.\n");
         return false;
     }
+    if (args.IsArgSet("-backupfile") && command != "encryptdescriptor" && command != "decryptdescriptor" && command != "importencrypteddescriptor" && command != "inspectencryptedbackup") {
+        tfm::format(std::cerr, "The -backupfile option can only be used with the \"encryptdescriptor\", \"decryptdescriptor\", \"importencrypteddescriptor\", and \"inspectencryptedbackup\" commands.\n");
+        return false;
+    }
     if ((command == "create" || command == "createfromdump") && !args.IsArgSet("-wallet")) {
         tfm::format(std::cerr, "Wallet name must be provided when creating a new wallet.\n");
         return false;
@@ -163,6 +210,175 @@ bool ExecuteWalletToolFunc(const ArgsManager& args, const std::string& command)
             tfm::format(std::cerr, "%s\n", error.original);
         }
         return ret;
+    } else if (command == "encryptdescriptor") {
+        // Encrypt a descriptor string using BIP-XXXX encrypted backup format
+        if (!args.IsArgSet("-descriptor")) {
+            tfm::format(std::cerr, "Descriptor string must be provided via -descriptor for encryptdescriptor.\n");
+            return false;
+        }
+        const std::string descriptor = args.GetArg("-descriptor", "");
+
+        // Validate the descriptor parses and has a checksum
+        FlatSigningProvider keys;
+        std::string parse_error;
+        auto parsed = Parse(descriptor, keys, parse_error, /*require_checksum=*/true);
+        if (parsed.empty()) {
+            tfm::format(std::cerr, "Invalid descriptor: %s\n", parse_error);
+            return false;
+        }
+
+        // Plaintext is the raw descriptor string
+        std::vector<uint8_t> plaintext(descriptor.begin(), descriptor.end());
+
+        auto extract_result = ExtractKeysFromDescriptor(descriptor);
+        if (!extract_result) {
+            tfm::format(std::cerr, "Failed to extract keys: %s\n",
+                        util::ErrorString(extract_result).original);
+            return false;
+        }
+        auto& [encryption_keys, derivation_paths] = *extract_result;
+
+        // Create backup content metadata
+        EncryptedBackupContent content;
+        content.type = ContentType::BIP_NUMBER;
+        content.bip_number = BIP_DESCRIPTORS;
+
+        // Create the encrypted backup
+        auto backup_result = CreateEncryptedBackup(encryption_keys, plaintext, content, derivation_paths);
+        if (!backup_result) {
+            tfm::format(std::cerr, "Failed to create encrypted backup: %s\n",
+                        util::ErrorString(backup_result).original);
+            return false;
+        }
+
+        // If -backupfile is set, write raw binary backup to that file. Otherwise output base64 to stdout.
+        const std::string backup_filename = args.GetArg("-backupfile", "");
+        if (!backup_filename.empty()) {
+            fs::path out_path = fs::absolute(fs::PathFromString(backup_filename));
+            if (fs::exists(out_path)) {
+                tfm::format(std::cerr, "File %s already exists. If you are sure this is what you want, move it out of the way first.\n", fs::PathToString(out_path));
+                return false;
+            }
+            auto binary_backup = EncodeEncryptedBackup(*backup_result);
+            if (!binary_backup) {
+                tfm::format(std::cerr, "Error encoding backup: %s\n", util::ErrorString(binary_backup).original);
+                return false;
+            }
+            std::ofstream out_file(out_path.std_path(), std::ios::binary);
+            if (out_file.fail()) {
+                tfm::format(std::cerr, "Unable to open %s for writing\n", fs::PathToString(out_path));
+                return false;
+            }
+            out_file.write(reinterpret_cast<const char*>(binary_backup->data()), binary_backup->size());
+            if (out_file.fail()) {
+                tfm::format(std::cerr, "Error writing backup to %s\n", fs::PathToString(out_path));
+                return false;
+            }
+        } else {
+            auto base64_backup = EncodeEncryptedBackupBase64(*backup_result);
+            if (!base64_backup) {
+                tfm::format(std::cerr, "Error encoding backup: %s\n", util::ErrorString(base64_backup).original);
+                return false;
+            }
+            tfm::format(std::cout, "%s\n", *base64_backup);
+        }
+    } else if (command == "decryptdescriptor") {
+        // Decrypt an encrypted backup using a provided extended public key
+        auto descriptor = ReadAndDecryptBackup(args);
+        if (!descriptor) {
+            tfm::format(std::cerr, "%s\n", util::ErrorString(descriptor).original);
+            return false;
+        }
+
+        tfm::format(std::cout, "%s\n", *descriptor);
+    } else if (command == "importencrypteddescriptor") {
+        // Decrypt an encrypted backup and import the descriptor into a wallet
+        if (!args.IsArgSet("-wallet")) {
+            tfm::format(std::cerr, "Wallet name must be provided for importencrypteddescriptor.\n");
+            return false;
+        }
+
+        auto descriptor_result = ReadAndDecryptBackup(args);
+        if (!descriptor_result) {
+            tfm::format(std::cerr, "%s\n", util::ErrorString(descriptor_result).original);
+            return false;
+        }
+
+        // Parse the decrypted descriptor string
+        std::string descriptor(*descriptor_result);
+        FlatSigningProvider keys;
+        std::string parse_error;
+        auto parsed_descs = Parse(descriptor, keys, parse_error, /*require_checksum=*/true);
+        if (parsed_descs.empty()) {
+            tfm::format(std::cerr, "Invalid descriptor in backup: %s\n", parse_error);
+            return false;
+        }
+
+        // Load the target wallet
+        DatabaseOptions options;
+        ReadDatabaseArgs(args, options);
+        options.require_existing = true;
+        const std::shared_ptr<CWallet> wallet_instance = MakeWallet(name, path, options);
+        if (!wallet_instance) {
+            tfm::format(std::cerr, "Unable to load wallet \"%s\" for importencrypteddescriptor.\n", name);
+            return false;
+        }
+
+        LOCK(wallet_instance->cs_wallet);
+
+        // Import each sub-descriptor (multipath descriptors may produce multiple)
+        for (size_t j = 0; j < parsed_descs.size(); ++j) {
+            auto& parsed_desc = parsed_descs[j];
+            const bool is_range = parsed_desc->IsRange();
+            int64_t range_start = 0;
+            int64_t range_end = is_range ? wallet_instance->m_keypool_size : 0;
+
+            WalletDescriptor w_desc(std::move(parsed_desc), /*creation_time=*/1, range_start, range_end, /*next_index=*/0);
+
+            bool internal = (parsed_descs.size() == 2 && j == 1);
+            auto spk_manager_res = wallet_instance->AddWalletDescriptor(w_desc, keys, /*label=*/"", internal);
+            if (!spk_manager_res) {
+                tfm::format(std::cerr, "Failed to import descriptor: %s\n",
+                            util::ErrorString(spk_manager_res).original);
+                wallet_instance->Close();
+                return false;
+            }
+        }
+
+        tfm::format(std::cout, "Descriptor imported successfully into wallet \"%s\".\n", name);
+        wallet_instance->Close();
+    } else if (command == "inspectencryptedbackup") {
+        // Show unencrypted metadata from a backup
+        auto backup_result = ReadBackupFromArgsOrStdin(args);
+        if (!backup_result) {
+            tfm::format(std::cerr, "Failed to decode backup: %s\n",
+                        util::ErrorString(backup_result).original);
+            return false;
+        }
+
+        const EncryptedBackup& backup = *backup_result;
+
+        // Output metadata as JSON (only unencrypted header fields)
+        UniValue result(UniValue::VOBJ);
+        result.pushKV("version", backup.version);
+        result.pushKV("keys", static_cast<int>(backup.individual_secrets.size()));
+
+        // Encryption algorithm
+        std::string enc_str;
+        switch (backup.encryption) {
+            case EncryptionAlgorithm::CHACHA20_POLY1305: enc_str = "ChaCha20-Poly1305"; break;
+            default: enc_str = "unknown"; break;
+        }
+        result.pushKV("encryption", enc_str);
+
+        // Derivation paths
+        UniValue paths_arr(UniValue::VARR);
+        for (const auto& path : backup.derivation_paths) {
+            paths_arr.push_back(WriteHDKeypath(path, /*apostrophe=*/true));
+        }
+        result.pushKV("derivation_paths", paths_arr);
+
+        tfm::format(std::cout, "%s\n", result.write(2));
     } else {
         tfm::format(std::cerr, "Invalid command: %s\n", command);
         return false;

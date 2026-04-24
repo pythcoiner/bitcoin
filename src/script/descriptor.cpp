@@ -429,7 +429,7 @@ public:
         std::copy(keyid.begin(), keyid.begin() + sizeof(info.fingerprint), info.fingerprint);
         info.path = m_path;
         if (m_derive == DeriveType::UNHARDENED_RANGED) info.path.push_back((uint32_t)pos);
-        if (m_derive == DeriveType::HARDENED_RANGED) info.path.push_back(((uint32_t)pos) | 0x80000000L);
+        if (m_derive == DeriveType::HARDENED_RANGED) info.path.push_back(((uint32_t)pos) | BIP32_HARDENED);
 
         // Derive keys or fetch them from cache
         CExtPubKey final_extkey = m_root_extkey;
@@ -450,7 +450,7 @@ public:
             if (!GetDerivedExtKey(arg, xprv, lh_xprv)) return std::nullopt;
             parent_extkey = xprv.Neuter();
             if (m_derive == DeriveType::UNHARDENED_RANGED) der = xprv.Derive(xprv, pos);
-            if (m_derive == DeriveType::HARDENED_RANGED) der = xprv.Derive(xprv, pos | 0x80000000UL);
+            if (m_derive == DeriveType::HARDENED_RANGED) der = xprv.Derive(xprv, pos | BIP32_HARDENED);
             final_extkey = xprv.Neuter();
             if (lh_xprv.key.IsValid()) {
                 last_hardened_extkey = lh_xprv.Neuter();
@@ -576,7 +576,7 @@ public:
         CExtKey dummy;
         if (!GetDerivedExtKey(arg, extkey, dummy)) return;
         if (m_derive == DeriveType::UNHARDENED_RANGED && !extkey.Derive(extkey, pos)) return;
-        if (m_derive == DeriveType::HARDENED_RANGED && !extkey.Derive(extkey, pos | 0x80000000UL)) return;
+        if (m_derive == DeriveType::HARDENED_RANGED && !extkey.Derive(extkey, pos | BIP32_HARDENED)) return;
         out.keys.emplace(extkey.key.GetPubKey().GetID(), extkey.key);
     }
     std::optional<CPubKey> GetRootPubKey() const override
@@ -1754,25 +1754,13 @@ enum class ParseScriptContext {
 std::optional<uint32_t> ParseKeyPathNum(std::span<const char> elem, bool& apostrophe, std::string& error, bool& has_hardened)
 {
     bool hardened = false;
-    if (elem.size() > 0) {
-        const char last = elem[elem.size() - 1];
-        if (last == '\'' || last == 'h') {
-            elem = elem.first(elem.size() - 1);
-            hardened = true;
-            apostrophe = last == '\'';
-        }
+    const auto index{ParseKeyPathElement(elem, hardened, error)};
+    if (!index.has_value()) return std::nullopt;
+    if (hardened) {
+        has_hardened = true;
+        apostrophe = elem.back() == '\'';
     }
-    const auto p{ToIntegral<uint32_t>(std::string_view{elem.begin(), elem.end()})};
-    if (!p) {
-        error = strprintf("Key path value '%s' is not a valid uint32", std::string_view{elem.begin(), elem.end()});
-        return std::nullopt;
-    } else if (*p > 0x7FFFFFFFUL) {
-        error = strprintf("Key path value %u is out of range", *p);
-        return std::nullopt;
-    }
-    has_hardened = has_hardened || hardened;
-
-    return std::make_optional<uint32_t>(*p | (((uint32_t)hardened) << 31));
+    return *index | (hardened ? BIP32_HARDENED : BIP32_UNHARDENED);
 }
 
 /**
@@ -3003,4 +2991,14 @@ std::unordered_map<uint32_t, ExtPubKeyMap> DescriptorCache::GetCachedDerivedExtP
 ExtPubKeyMap DescriptorCache::GetCachedLastHardenedExtPubKeys() const
 {
     return m_last_hardened_xpubs;
+}
+
+std::optional<CExtPubKey> ParseExtPubKeyExpression(const std::string& str, std::string& error)
+{
+    FlatSigningProvider out;
+    uint32_t key_exp_index = 0;
+    const std::span<const char> sp{str.data(), str.size()};
+    auto providers = ParsePubkey(key_exp_index, sp, ParseScriptContext::P2WPKH, out, error);
+    if (providers.empty()) return std::nullopt;
+    return providers[0]->GetRootExtPubKey();
 }
