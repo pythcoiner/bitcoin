@@ -290,12 +290,12 @@ protected:
             break;
         case StringType::CANONICAL:
             // CANONICAL always uses h
-            hardened = 'h';
+            hardened = BIP32_DEFAULT_HARDENED_CHAR;
             break;
         case StringType::PUBLIC:
             // Normalizing always uses h
             if (normalized) {
-                hardened = 'h';
+                hardened = BIP32_DEFAULT_HARDENED_CHAR;
             }
             // Otherwise use whatever the original character was
             break;
@@ -461,7 +461,7 @@ class BIP32PubkeyProvider final : public PubkeyProvider
     KeyPath m_path;
     DeriveType m_derive;
     // Character to use for ranged hardened derivation
-    char m_hardened{'h'};
+    char m_hardened{BIP32_DEFAULT_HARDENED_CHAR};
 
     bool GetExtKey(const SigningProvider& arg, CExtKey& ret) const
     {
@@ -636,8 +636,8 @@ public:
         assert(xpub.pubkey.IsValid());
 
         // Build the string
-        std::string origin_str = HexStr(origin.fingerprint) + FormatHDKeypath(origin.path, 'h');
-        out = "[" + origin_str + "]" + EncodeExtPubKey(xpub) + FormatHDKeypath(end_path, 'h');
+        std::string origin_str = HexStr(origin.fingerprint) + FormatHDKeypath(origin.path, BIP32_DEFAULT_HARDENED_CHAR);
+        out = "[" + origin_str + "]" + EncodeExtPubKey(xpub) + FormatHDKeypath(end_path, BIP32_DEFAULT_HARDENED_CHAR);
         if (IsRange()) {
             out += "/*";
             assert(m_derive == DeriveType::UNHARDENED_RANGED);
@@ -783,7 +783,7 @@ public:
             out += pubkey->ToString(type);
         }
         out += ')';
-        out += FormatHDKeypath(m_path, 'h');
+        out += FormatHDKeypath(m_path, BIP32_DEFAULT_HARDENED_CHAR);
         if (IsRangedDerivation()) {
             out += "/*";
         }
@@ -803,7 +803,7 @@ public:
             out += tmp;
         }
         out += ')';
-        out += FormatHDKeypath(m_path, 'h');
+        out += FormatHDKeypath(m_path, BIP32_DEFAULT_HARDENED_CHAR);
         if (IsRangedDerivation()) {
             out += "/*";
         }
@@ -822,7 +822,7 @@ public:
             out += tmp;
         }
         out += ')';
-        out += FormatHDKeypath(m_path, 'h');
+        out += FormatHDKeypath(m_path, BIP32_DEFAULT_HARDENED_CHAR);
         if (IsRangedDerivation()) {
             out += "/*";
         }
@@ -2041,7 +2041,7 @@ std::unique_ptr<PubkeyProvider> ParsePubkeyInner(uint32_t& key_exp_index, const 
         return {};
     }
     split.erase(split.begin());
-    char hardened{'h'};
+    char hardened{BIP32_DEFAULT_HARDENED_CHAR};
     DeriveType type = ParseDeriveType(split, hardened);
     util::Expected<KeyPath, std::string> parsed_path = ParseHDKeypath(split, /*allow_multipath=*/true);
     if (!parsed_path) {
@@ -2219,7 +2219,7 @@ std::unique_ptr<PubkeyProvider> InferPubkey(const CPubKey& pubkey, ParseScriptCo
     KeyOriginInfo info;
     if (provider.GetKeyOrigin(pubkey.GetID(), info)) {
         // Force origin paths to always use h
-        info.path.SetHardenedChar('h');
+        info.path.SetHardenedChar(BIP32_DEFAULT_HARDENED_CHAR);
         return std::make_unique<OriginPubkeyProvider>(0, std::move(info), std::move(key_provider));
     }
     return key_provider;
@@ -2232,7 +2232,7 @@ std::unique_ptr<PubkeyProvider> InferXOnlyPubkey(const XOnlyPubKey& xkey, ParseS
     KeyOriginInfo info;
     if (provider.GetKeyOriginByXOnly(xkey, info)) {
         // Force origin paths to always use h
-        info.path.SetHardenedChar('h');
+        info.path.SetHardenedChar(BIP32_DEFAULT_HARDENED_CHAR);
         return std::make_unique<OriginPubkeyProvider>(0, std::move(info), std::move(key_provider));
     }
     return key_provider;

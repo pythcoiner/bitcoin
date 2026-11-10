@@ -20,6 +20,8 @@
 static constexpr uint32_t BIP32_UNHARDENED_FLAG = 0x0;
 /** BIP32 hardened derivation flag (2^31) */
 static constexpr uint32_t BIP32_HARDENED_FLAG = 0x80000000;
+/** Default character marking a hardened derivation step */
+static constexpr char BIP32_DEFAULT_HARDENED_CHAR{'h'};
 
 class SingleKeyPathElement {
 private:
@@ -30,7 +32,7 @@ private:
 public:
     SingleKeyPathElement() = default;
     SingleKeyPathElement(uint32_t index, std::optional<char> hardened) : m_index(index), m_hardened(hardened) {}
-    SingleKeyPathElement(uint32_t num) : m_index(num & ~BIP32_HARDENED_FLAG), m_hardened(bool(num & BIP32_HARDENED_FLAG) ? std::optional{'h'} : std::nullopt) {}
+    SingleKeyPathElement(uint32_t num) : m_index(num & ~BIP32_HARDENED_FLAG), m_hardened(bool(num & BIP32_HARDENED_FLAG) ? std::optional{BIP32_DEFAULT_HARDENED_CHAR} : std::nullopt) {}
 
     /** Derivation index with the hardened flag applied */
     uint32_t ChildNumber() const { return m_index | (m_hardened.has_value() ? BIP32_HARDENED_FLAG : BIP32_UNHARDENED_FLAG); }
@@ -58,7 +60,7 @@ public:
         uint32_t num;
         s >> num;
         m_index = num & ~BIP32_HARDENED_FLAG;
-        m_hardened = bool(num & BIP32_HARDENED_FLAG) ? std::optional{'h'} : std::nullopt;
+        m_hardened = bool(num & BIP32_HARDENED_FLAG) ? std::optional{BIP32_DEFAULT_HARDENED_CHAR} : std::nullopt;
     }
 };
 
@@ -140,7 +142,7 @@ std::optional<KeyPath> ParseHDKeypath(const std::string& keypath_str, bool allow
 util::Expected<KeyPath, std::string> ParseHDKeypath(const std::vector<std::span<const char>>& split_keypath, bool allow_multipath);
 
 /** Write HD keypaths as strings */
-std::string WriteHDKeypath(const KeyPath& keypath, const std::optional<char>& hardened_char = 'h');
-std::string FormatHDKeypath(const KeyPath& path, const std::optional<char>& hardened_char = 'h');
+std::string WriteHDKeypath(const KeyPath& keypath, const std::optional<char>& hardened_char = BIP32_DEFAULT_HARDENED_CHAR);
+std::string FormatHDKeypath(const KeyPath& path, const std::optional<char>& hardened_char = BIP32_DEFAULT_HARDENED_CHAR);
 
 #endif // BITCOIN_UTIL_BIP32_H
