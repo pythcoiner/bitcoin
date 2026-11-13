@@ -868,6 +868,7 @@ public:
     {
         return 1 + m_participants.size();
     }
+    const std::vector<std::unique_ptr<PubkeyProvider>>& GetParticipants() const { return m_participants; }
     bool CanSelfExpand() const override
     {
         // Participants must be self expandable for all MuSig expressions to be self expandable; the aggregate pubkey cannot be stored
@@ -915,6 +916,8 @@ public:
     DescriptorImpl(std::vector<std::unique_ptr<PubkeyProvider>> pubkeys, const std::string& name) : m_pubkey_args(std::move(pubkeys)), m_name(name), m_subdescriptor_args() {}
     DescriptorImpl(std::vector<std::unique_ptr<PubkeyProvider>> pubkeys, std::unique_ptr<DescriptorImpl> script, const std::string& name) : m_pubkey_args(std::move(pubkeys)), m_name(name), m_subdescriptor_args(Vector(std::move(script))) {}
     DescriptorImpl(std::vector<std::unique_ptr<PubkeyProvider>> pubkeys, std::vector<std::unique_ptr<DescriptorImpl>> scripts, const std::string& name) : m_pubkey_args(std::move(pubkeys)), m_name(name), m_subdescriptor_args(std::move(scripts)) {}
+
+    const std::vector<std::unique_ptr<PubkeyProvider>>& GetPubkeyArgs() const { return m_pubkey_args; }
 
     enum class StringType
     {
@@ -1443,6 +1446,7 @@ protected:
 public:
     MultiADescriptor(int threshold, std::vector<std::unique_ptr<PubkeyProvider>> providers, bool sorted = false) : DescriptorImpl(std::move(providers), sorted ? "sortedmulti_a" : "multi_a"), m_threshold(threshold), m_sorted(sorted) {}
     bool IsSingleType() const final { return true; }
+    bool IsSorted() const { return m_sorted; }
 
     std::optional<int64_t> ScriptSize() const override {
         const auto n_keys = m_pubkey_args.size();
@@ -2005,6 +2009,11 @@ std::vector<std::unique_ptr<PubkeyProvider>> ParsePubkeyInner(uint32_t& key_exp_
         error = strprintf("Key '%s' is invalid due to whitespace", str);
         return {};
     }
+    // A bare '_' as tr()'s internal key is handled by the tr() parser, so here it is misplaced or not bare.
+    if (str == "_") {
+        error = "Key '_' is only allowed as the internal key of tr(), without origin or derivation";
+        return {};
+    }
     if (split.size() == 1) {
         if (IsHex(str)) {
             std::vector<unsigned char> data = ParseHex(str);
@@ -2397,6 +2406,77 @@ struct KeyParser {
     }
 };
 
+/** Unspendable xpub for tr(_,TREE), committing to the root keys of TREE. */
+std::optional<CExtPubKey> UnspendableInternalExtPubKey(const std::vector<std::vector<std::unique_ptr<DescriptorImpl>>>& subscripts, std::string& error)
+{
+    // Public key of each xpub as written in TREE, before any derivation.
+    const auto root_pubkey = [&error](const PubkeyProvider& provider) -> std::optional<CPubKey> {
+        const auto ext_pub{provider.GetRootExtPubKey()};
+        if (!ext_pub) {
+            error = "'_' requires all keys in the script tree to be xpubs or xprvs";
+            return std::nullopt;
+        }
+        return ext_pub->pubkey;
+    };
+    // Only keys are committed to, not the rest of TREE, so no normalization of the policy is needed.
+    CSHA256 hasher;
+    for (const auto& leaf_expansions : subscripts) {
+        // Root keys are the same in all multipath expansions, the first one is enough.
+        const DescriptorImpl& leaf{*leaf_expansions.at(0)};
+        const auto* multi_a{dynamic_cast<const MultiADescriptor*>(&leaf)};
+        // Keys are taken in written order: where the order matters (pk(), multi_a(), ...) it is part of the leaf
+        // script, so another order is another output anyway. No dedup: a repeated key is repeated in the scripts too.
+        std::vector<std::vector<unsigned char>> leaf_keys;
+        for (const auto& provider : leaf.GetPubkeyArgs()) {
+            std::vector<CPubKey> pubkeys;
+            if (const auto* musig{dynamic_cast<const MuSigPubkeyProvider*>(provider.get())}) {
+                for (const auto& participant : musig->GetParticipants()) {
+                    const auto pubkey{root_pubkey(*participant)};
+                    if (!pubkey) return std::nullopt;
+                    pubkeys.push_back(*pubkey);
+                }
+                // Sorted so that musig() gives the same unspendable key whatever the order of its keys.
+                std::sort(pubkeys.begin(), pubkeys.end());
+            } else {
+                const auto pubkey{root_pubkey(*provider)};
+                if (!pubkey) return std::nullopt;
+                pubkeys.push_back(*pubkey);
+            }
+            auto& key{leaf_keys.emplace_back()};
+            for (const CPubKey& pubkey : pubkeys) key.insert(key.end(), pubkey.begin(), pubkey.end());
+        }
+        // Same for sortedmulti_a(), a musig() in it counting as one key made of its sorted participants.
+        if (multi_a && multi_a->IsSorted()) std::sort(leaf_keys.begin(), leaf_keys.end());
+        for (const auto& key : leaf_keys) hasher.Write(key.data(), key.size());
+    }
+    // H has no known private key: the key path is unspendable, and anyone knowing TREE can check it.
+    CExtPubKey ret{};
+    ret.pubkey = XOnlyPubKey::NUMS_H.GetEvenCorrespondingCPubKey();
+    hasher.Finalize(ret.chaincode.begin());
+    return ret;
+}
+
+/** Build the providers of tr(_,TREE)'s internal key, its derivation implied by TREE. */
+std::vector<std::unique_ptr<PubkeyProvider>> ParseUnspendableInternalKey(uint32_t key_exp_index, const std::vector<std::vector<std::unique_ptr<DescriptorImpl>>>& subscripts, size_t num_expansions, FlatSigningProvider& out, std::string& error)
+{
+    // The internal key must change at each address, or script path spends would link all outputs together.
+    if (std::ranges::none_of(subscripts, [](const auto& leaf_expansions) { return leaf_expansions.at(0)->IsRange(); })) {
+        error = "'_' requires a ranged script tree";
+        return {};
+    }
+    const auto xpub{UnspendableInternalExtPubKey(subscripts, error)};
+    if (!xpub) return {};
+    // One multipath step per TREE expansion, then the wildcard: same result as writing the xpub with that derivation.
+    std::string key{EncodeExtPubKey(*xpub)};
+    if (num_expansions > 1) {
+        key += "/<";
+        for (size_t i = 0; i < num_expansions; ++i) key += strprintf("%s%u", i ? ";" : "", i);
+        key += ">";
+    }
+    key += "/*";
+    return ParsePubkey(key_exp_index, key, ParseScriptContext::P2TR, out, error);
+}
+
 /** Parse a script in a particular context. */
 // NOLINTNEXTLINE(misc-no-recursion)
 std::vector<std::unique_ptr<DescriptorImpl>> ParseScript(uint32_t& key_exp_index, std::span<const char>& sp, ParseScriptContext ctx, FlatSigningProvider& out, std::string& error)
@@ -2587,10 +2667,22 @@ std::vector<std::unique_ptr<DescriptorImpl>> ParseScript(uint32_t& key_exp_index
     }
     if (ctx == ParseScriptContext::TOP && Func("tr", expr)) {
         auto arg = Expr(expr);
-        auto internal_keys = ParsePubkey(key_exp_index, arg, ParseScriptContext::P2TR, out, error);
-        if (internal_keys.empty()) {
-            error = strprintf("tr(): %s", error);
-            return {};
+        // '_' is computed from the tree, so it is built after it, keeping the internal key at index 0.
+        const bool unspendable_internal{std::string_view(arg.data(), arg.size()) == "_"};
+        const uint32_t internal_key_index{key_exp_index};
+        std::vector<std::unique_ptr<PubkeyProvider>> internal_keys;
+        if (unspendable_internal) {
+            if (!expr.size()) {
+                error = "tr(): '_' requires a script tree";
+                return {};
+            }
+            ++key_exp_index;
+        } else {
+            internal_keys = ParsePubkey(key_exp_index, arg, ParseScriptContext::P2TR, out, error);
+            if (internal_keys.empty()) {
+                error = strprintf("tr(): %s", error);
+                return {};
+            }
         }
         size_t max_providers_len = internal_keys.size();
         std::vector<std::vector<std::unique_ptr<DescriptorImpl>>> subscripts; //!< list of multipath expanded script subexpressions
@@ -2655,6 +2747,14 @@ std::vector<std::unique_ptr<DescriptorImpl>> ParseScript(uint32_t& key_exp_index
                 }
             } else if (vec.size() != max_providers_len) {
                 error = strprintf("tr(): Multipath subscripts have mismatched lengths");
+                return {};
+            }
+        }
+
+        if (unspendable_internal) {
+            internal_keys = ParseUnspendableInternalKey(internal_key_index, subscripts, max_providers_len, out, error);
+            if (internal_keys.empty()) {
+                error = strprintf("tr(): %s", error);
                 return {};
             }
         }

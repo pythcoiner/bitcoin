@@ -1484,4 +1484,76 @@ BOOST_AUTO_TEST_CASE(unused_descriptor_test)
     CheckUnused("unused(xprvA1RpRA33e1JQ7ifknakTFpgNXPmW2YvmhqLQYMmrj4xJXXWYpDPS3xz7iAxn8L39njGVyuoseXzU6rcxFLJ8HFsTjSyQbLYnMpCqE2VbFWc/0h/0h/1)", "unused(xpub6ERApfZwUNrhLCkDtcHTcxd75RbzS1ed54G1LkBUHQVHQKqhMkhgbmJbZRkrgZw4koxb5JaHWkY4ALHY2grBGRjaDMzQLcgJvLJuZZvRcEL/0h/0h/1)");
 }
 
+/** Check that tr(_,TREE) parses to the same descriptors and scripts as tr(INTERNAL,TREE). */
+void CheckUnspendableInternalKey(const std::string& tree, const std::string& internal)
+{
+    FlatSigningProvider keys_unspendable, keys_expected;
+    std::string error;
+    const auto unspendable{Parse("tr(_," + tree + ")", keys_unspendable, error)};
+    BOOST_REQUIRE_MESSAGE(!unspendable.empty(), error);
+    const auto expected{Parse("tr(" + internal + "," + tree + ")", keys_expected, error)};
+    BOOST_REQUIRE_MESSAGE(!expected.empty(), error);
+    BOOST_REQUIRE_EQUAL(unspendable.size(), expected.size());
+    for (size_t i = 0; i < expected.size(); ++i) {
+        BOOST_CHECK_EQUAL(unspendable[i]->ToString(), expected[i]->ToString());
+        for (int pos = 0; pos < 3; ++pos) {
+            std::vector<CScript> scripts_unspendable, scripts_expected;
+            FlatSigningProvider out_unspendable, out_expected;
+            BOOST_REQUIRE(unspendable[i]->Expand(pos, keys_unspendable, scripts_unspendable, out_unspendable));
+            BOOST_REQUIRE(expected[i]->Expand(pos, keys_expected, scripts_expected, out_expected));
+            BOOST_CHECK(scripts_unspendable == scripts_expected);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(unspendable_internal_key_test)
+{
+    // Same internal keys as the Liana wallet, re-encoded for mainnet.
+    CheckUnspendableInternalKey("{and_v(v:multi_a(1,[ffd63c8d/48'/1'/0'/2']xpub6EaXWzNMztuwgbWQKsk1USP8agzq3FmzHhPSjbNU7hPZi5kxBKeJSBTm4AzTfnYBB4eYT9UTLq24Vi8R2D7XWaFGhL8XaevQeARtLz1Bu3f/<2;3>/*,[da2ee873/48'/1'/0'/2']xpub6EDu1rbuespVu8Deex8RkWJtwdkyz3AZzz4Q8wXG4heA1gzztDWXe2V12nPhtnaHNSPHH2dHCX5vFuQ9bkVLR9icgqdWhd2oJkU7VPFDiAp/<2;3>/*),older(2)),multi_a(2,[ffd63c8d/48'/1'/0'/2']xpub6EaXWzNMztuwgbWQKsk1USP8agzq3FmzHhPSjbNU7hPZi5kxBKeJSBTm4AzTfnYBB4eYT9UTLq24Vi8R2D7XWaFGhL8XaevQeARtLz1Bu3f/<0;1>/*,[da2ee873/48'/1'/0'/2']xpub6EDu1rbuespVu8Deex8RkWJtwdkyz3AZzz4Q8wXG4heA1gzztDWXe2V12nPhtnaHNSPHH2dHCX5vFuQ9bkVLR9icgqdWhd2oJkU7VPFDiAp/<0;1>/*)}", "xpub661MyMwAqRbcGpzcwZVc1dPj7VukKkRdAa4n5PEdpsgUZo9HaYKUqwniKZbdJZgV1iauLfnS1Ak5ZBvgbZwsazJRuPfAENyTTBN1fgeS2br/<0;1>/*");
+    CheckUnspendableInternalKey("{and_v(v:multi_a(1,[37435aca/48'/1'/0'/2']xpub6EEw5sf5N3S74SpAP9ZHUhZGwtHd7owGLpfAYuVkzByx86SLbxSqC6PC1su9DxZ8LHXvPyCLdNLbYifVjLNg1maewWj1dT7Wbd1nYzQy41i/<2;3>/*,[05813578/48'/1'/0'/2']xpub6Ec8sSeZqwPXxrChRPiwMcGnTmn8ZoJdmHgbw8mRXdKi8BYbGzFYVfDpgTYETWHPUV1S1o4XP7EA3vt5E2oJL2wDseDdC61LrXJbPfKYaEd/<2;3>/*),older(52596)),and_v(v:pk([37435aca/48'/1'/0'/2']xpub6EEw5sf5N3S74SpAP9ZHUhZGwtHd7owGLpfAYuVkzByx86SLbxSqC6PC1su9DxZ8LHXvPyCLdNLbYifVjLNg1maewWj1dT7Wbd1nYzQy41i/<0;1>/*),pk([05813578/48'/1'/0'/2']xpub6Ec8sSeZqwPXxrChRPiwMcGnTmn8ZoJdmHgbw8mRXdKi8BYbGzFYVfDpgTYETWHPUV1S1o4XP7EA3vt5E2oJL2wDseDdC61LrXJbPfKYaEd/<0;1>/*))}", "xpub661MyMwAqRbcG1ZR4tsv3gzMhguBjD2myyWr2Cw6FTf2hj4SAthRVbzZa1ZS7rYk2NztzgzcDPk9QNzDxz8AXzZpThsc3sgNGtQR3VHYiKo/<0;1>/*");
+
+    const std::string a{"xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8"};
+    const std::string b{"xpub69H7F5d8KSRgmmdJg2KhpAK8SR3DjMwAdkxj3ZuxV27CprR9LgpeyGmXUbC6wb7ERfvrnKZjXoUmmDznezpbZb7ap6r1D3tgFxHmwMkQTPH"};
+    // The pubkey of b sorts before the one of a.
+    const std::string sorted_ab{"xpub661MyMwAqRbcFCEQLCe3NH9ZzW1LQFPknAx5fXw7ZhGqupEZ6vuZFNeaXsn2QZb7wRdHrPreyKk4EJ67JtCVY2K4r3ChF2hgFoejgUSWcp5"};
+    const std::string unsorted_ab{"xpub661MyMwAqRbcFtyYWRnJdvcB7CpL6NPSJHTkzCTvcLDngnJVrT2dGowmq6gdJajtTPTkCuuMkxevBaQ9TV3hWwNXwDXmeFguAjQgTZomUtQ"};
+
+    // Key order only matters where it changes the script.
+    CheckUnspendableInternalKey("sortedmulti_a(2," + a + "/<0;1>/*," + b + "/<0;1>/*)", sorted_ab + "/<0;1>/*");
+    CheckUnspendableInternalKey("sortedmulti_a(2," + b + "/<0;1>/*," + a + "/<0;1>/*)", sorted_ab + "/<0;1>/*");
+    CheckUnspendableInternalKey("multi_a(2," + a + "/<0;1>/*," + b + "/<0;1>/*)", unsorted_ab + "/<0;1>/*");
+    CheckUnspendableInternalKey("multi_a(2," + b + "/<0;1>/*," + a + "/<0;1>/*)", sorted_ab + "/<0;1>/*");
+    CheckUnspendableInternalKey("pk(musig(" + a + "," + b + ")/<0;1>/*)", sorted_ab + "/<0;1>/*");
+    CheckUnspendableInternalKey("pk(musig(" + b + "," + a + ")/<0;1>/*)", sorted_ab + "/<0;1>/*");
+
+    // Inside sortedmulti_a(), a musig() is sorted first, then sorted with the other keys as one key.
+    const std::string c{"xpub69H7F5dQzmVd3vPuLKtcXJziMEQByuDidnX3YdwgtNsecY5HRGtAAQC5mXTt4dsv9RzyjgDjAQs9VGVV6ydYCHnprc9vvaA5YtqWyL6hyds"};
+    const std::string musig_c{"xpub661MyMwAqRbcFJjsCpEVXxLFpR3i3SmNobBgdhGx7As2bSzPHN969dKLVVNcvhKbpUU4U45o8NzozcKU81EiJtjZAdbAqrdQPUovQoCq3D6"};
+    CheckUnspendableInternalKey("sortedmulti_a(1,musig(" + a + "," + b + ")/*," + c + "/*)", musig_c + "/*");
+    CheckUnspendableInternalKey("sortedmulti_a(1," + c + "/*,musig(" + b + "," + a + ")/*)", musig_c + "/*");
+    // The pubkey of c sorts between the ones of b and a, so sorting all keys together gives another key.
+    CheckUnspendableInternalKey("sortedmulti_a(1," + b + "/*," + c + "/*," + a + "/*)", "xpub661MyMwAqRbcGBpm66FWxGCgGTceVoFeZEVyrWwHP2UezF4vPWumj22B5Ti9DbM5gNZBH7uNJK1ku4rC3pTWaEim7iyctLyt3G8vAhByp6k/*");
+
+    // Repeated keys are committed to each time.
+    CheckUnspendableInternalKey("{pk(" + a + "/<0;1>/*),pk(" + b + "/<0;1>/*)}", unsorted_ab + "/<0;1>/*");
+    CheckUnspendableInternalKey("{pk(" + a + "/<0;1>/*),{pk(" + b + "/<0;1>/*),pk(" + a + "/<2;3>/*)}}", "xpub661MyMwAqRbcGXHnxjrs9zjDg2kADrGVADoC4xSoY1pfrpfippXo2ypZdbsJk7fGYd1rsKskdXiPKEMTCcriWLp2JGvqQ6FvtydTuU8B6c5/<0;1>/*");
+
+    // The derivation of '_' follows the multipath expansions of the tree.
+    CheckUnspendableInternalKey("pk(" + a + "/*)", "xpub661MyMwAqRbcGNLZ2QAwjFGfAtYB4rPKATp2LF2kZuL4VoMwvq7Sp7u6wATTcSaQvUDQqq3ePDoqrBSSc6sdZcPxb6Mn9mxwG8EvDXpqC83/*");
+    CheckUnspendableInternalKey("pk(" + a + "/<0;1;2;3>/*)", "xpub661MyMwAqRbcGNLZ2QAwjFGfAtYB4rPKATp2LF2kZuL4VoMwvq7Sp7u6wATTcSaQvUDQqq3ePDoqrBSSc6sdZcPxb6Mn9mxwG8EvDXpqC83/<0;1;2;3>/*");
+
+    const std::string misplaced{"Key '_' is only allowed as the internal key of tr(), without origin or derivation"};
+    CheckSingleUnparsable("tr(" + a + "/*,pk(_))", "pk(): " + misplaced);
+    CheckSingleUnparsable("tr(" + a + "/*,pk(musig(_," + b + ")/*))", "pk(): musig(): " + misplaced);
+    CheckSingleUnparsable("wsh(pk(_))", "pk(): " + misplaced);
+    CheckSingleUnparsable("rawtr(_)", "rawtr(): " + misplaced);
+    CheckSingleUnparsable("tr(_/*,pk(" + a + "/*))", "tr(): " + misplaced);
+    CheckSingleUnparsable("tr(_/0,pk(" + a + "/*))", "tr(): " + misplaced);
+    CheckSingleUnparsable("tr(_/<0;1>/*,pk(" + a + "/<0;1>/*))", "tr(): " + misplaced);
+    CheckSingleUnparsable("tr([deadbeef]_,pk(" + a + "/*))", "tr(): " + misplaced);
+    CheckSingleUnparsable("tr(_)", "tr(): '_' requires a script tree");
+    CheckSingleUnparsable("tr(_,pk(" + a + "))", "tr(): '_' requires a ranged script tree");
+    CheckSingleUnparsable("tr(_,{pk(" + a + "/*),pk(03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd)})", "tr(): '_' requires all keys in the script tree to be xpubs or xprvs");
+}
+
 BOOST_AUTO_TEST_SUITE_END()
